@@ -1,0 +1,87 @@
+# Harness configuration for the petclinic PoC (Windows).
+# Place this at:  spring-petclinic/.harness/config.yaml
+# (the harness reads it at validation time; defaults are used if absent)
+
+# Command the HARNESS uses to run tests (the agent never runs these).
+# Windows uses the bundled wrapper. On macOS/Linux use: "./mvnw test"
+test_command: "mvnw.cmd test"
+
+# Targeted test for a fast demo loop. Empty string => run the full suite.
+test_filter: "OwnerTest"
+
+# Kill the build if it hangs beyond this many seconds.
+test_timeout: 600
+
+# Deterministic formatting pass the HARNESS applies before running tests.
+# spring-javaformat:apply rewrites files to petclinic's required format, so the
+# validation gate tests real correctness rather than failing on whitespace.
+# Set to "" to disable.
+pre_validation_command: "mvnw.cmd spring-javaformat:apply"
+
+# When validation (mvn test) fails, loop back to this phase to fix the code,
+# carrying the failure output as feedback. Set to "" to halt instead of looping.
+validation_loopback_phase: "coding"
+
+# Max code<->test retry cycles before halting for a human (guards credit burn).
+max_validation_retries: 3
+
+# --- coverage gate ---
+# Minimum line coverage %. Set to 0 to DISABLE the coverage gate.
+# When > 0, validation fails (and loops back) if coverage is below this.
+min_coverage: 0
+# Goal that generates the JaCoCo CSV (report binds to prepare-package, so we
+# invoke it explicitly after tests).
+coverage_command: "mvnw.cmd jacoco:report"
+# Repo-relative path to the JaCoCo CSV report.
+coverage_csv: "target/site/jacoco/jacoco.csv"
+# Metric to gate on: LINE, BRANCH, INSTRUCTION, or METHOD.
+coverage_metric: "LINE"
+
+# Where the harness reads the user story from (repo-relative).
+# In production an MCP/Jira step writes this file; for the demo it's committed.
+story_file: "stories/current-story.md"
+
+# ---- selective capability loading ----
+# false => load ALL skills/instructions every phase (more tokens).
+# true  => always-on guardrails (applyTo "**") + phase-relevant files only.
+selective_capability: true
+
+# Which stacks this repo contains. Instruction subfolders NOT listed are
+# excluded entirely. A backend-only repo (like a Spring Boot service) lists
+# only "backend" — angular-frontend/ and mobile-frontend/ instructions are
+# never loaded. Cross-cutting files directly under instructions/ (hipaa,
+# logging-standards, prompt-injection, output-naming) always load.
+# Use ["*"] or [] to include all stacks (e.g. a full-stack repo).
+repo_stacks: ["backend"]
+
+# Files each phase is concerned with. An instruction loads in a phase if its
+# applyTo glob intersects this scope. applyTo "**" files always load.
+phase_file_scope:
+  context: ["src/main/java/**", "src/main/**"]
+  prompt_steps: ["src/main/java/**", "src/main/**"]
+  coding: ["src/main/java/**"]
+  unit_testing: ["src/test/java/**"]
+  documentation: ["docs/**"]
+  raise_pr: []
+
+# Which named skills (folder under .github/skills) load in which phase.
+phase_skills:
+  context: ["build-context", "analyze-service"]
+  prompt_steps: ["build-prompt-steps"]
+  coding: ["security-review"]
+  unit_testing: []
+  documentation: []
+  raise_pr: []
+
+# Default model for live runs (fallback when a phase has no specific model).
+model: "gpt-5-mini"
+
+# Per-phase model override. A phase uses its entry here if present, else `model`.
+# Put cheap models on simple phases, stronger models where it matters.
+phase_models:
+  context: "gpt-5-mini"
+  prompt_steps: "gpt-5-mini"
+  coding: "claude-sonnet-4.6"
+  unit_testing: "gpt-5-mini"
+  documentation: "gpt-5-mini"
+  raise_pr: "gpt-5-mini"

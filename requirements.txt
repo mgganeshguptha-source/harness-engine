@@ -1,0 +1,14 @@
+# =============================================================================
+# harness-engine/requirements.txt
+# Python dependencies for the harness engine.
+#
+# The engine also needs the GitHub Copilot CLI (Node), installed separately in
+# the workflow via:  npm install -g @github/copilot
+# =============================================================================
+
+# The Copilot SDK the harness drives (imports as `copilot`).
+# Pin to the version the engine was built/tested against to avoid schema drift.
+github-copilot-sdk==1.0.4
+
+# YAML config parsing (config.yaml).
+pyyaml>=6.0

@@ -1,0 +1,126 @@
+# =============================================================================
+# harness-engine/.github/workflows/harness.yml
+# THE REUSABLE ENGINE WORKFLOW  (lives in the harness-engine repo)
+#
+# Service/sample repos call this via `uses:` (workflow_call). It runs in the
+# CALLER's repo context: the caller's code is what gets built and changed, and
+# the run consumes the CALLER's Actions minutes. This workflow supplies the
+# engine (Python) and the orchestration.
+#
+# TWO CHECKOUTS: a reusable workflow does NOT bring its own repo's files, so:
+#   1. the CALLER's service repo -> ./service  (the code the harness works on)
+#   2. this harness-engine repo  -> ./engine   (the Python engine under harness/)
+#
+# FLAT IMPORTS: the engine modules import each other flatly (e.g.
+# `from boundaries import ...`) and there is no __init__.py, so run.py MUST be
+# executed from INSIDE engine/harness (working-directory). That is why --repo
+# is given relative to engine/harness as ../../service.
+# =============================================================================
+name: Harness (engine)
+
+on:
+  workflow_call:
+    inputs:
+      feature_id:
+        description: "Story / feature id to run"
+        required: true
+        type: string
+      java-version:
+        description: "JDK for the target service build"
+        required: false
+        default: "17"
+        type: string
+      python-version:
+        required: false
+        default: "3.13"
+        type: string
+      node-version:
+        required: false
+        default: "20"
+        type: string
+      engine_ref:
+        description: "Tag/branch of harness-engine to run (pin for stability)"
+        required: false
+        default: "v1"
+        type: string
+    secrets:
+      COPILOT_GITHUB_TOKEN:
+        description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW)"
+        required: true
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # --- 1. the CALLER's service repo -> ./service ---
+      - name: Checkout target service repo
+        uses: actions/checkout@v4
+        with:
+          path: service
+          fetch-depth: 0
+
+      # --- 2. THIS engine repo -> ./engine ---
+      - name: Checkout harness-engine
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/harness-engine
+          ref: ${{ inputs.engine_ref }}
+          path: engine
+
+      # --- 3. toolchains ---
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # --- 4. install deps + Copilot CLI ---
+      - name: Install harness dependencies
+        run: pip install -r engine/requirements.txt
+
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @github/copilot
+
+      # --- 5. run the harness (from inside engine/harness for flat imports) ---
+      - name: Initialize run
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          python run.py init \
+            --repo ../../service \
+            --feature "${{ inputs.feature_id }}"
+
+      - name: Autorun (all phases)
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: "harness-bot"
+          GIT_AUTHOR_EMAIL: "harness-bot@users.noreply.github.com"
+          GIT_COMMITTER_NAME: "harness-bot"
+          GIT_COMMITTER_EMAIL: "harness-bot@users.noreply.github.com"
+        run: |
+          python run.py autorun --repo ../../service
+
+      # --- 6. always keep the audit, even on halt ---
+      - name: Collect audit
+        if: always()
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          python run.py collect-audit --repo ../../service || true
