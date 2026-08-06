@@ -2,19 +2,20 @@
 # harness-engine/.github/workflows/harness.yml
 # THE REUSABLE ENGINE WORKFLOW  (lives in the harness-engine repo)
 #
-# Service/sample repos call this via `uses:` (workflow_call). It runs in the
-# CALLER's repo context: the caller's code is what gets built and changed, and
-# the run consumes the CALLER's Actions minutes. This workflow supplies the
-# engine (Python) and the orchestration.
+# Runs in the CALLER's repo context. Supplies the engine + orchestration.
 #
-# TWO CHECKOUTS: a reusable workflow does NOT bring its own repo's files, so:
-#   1. the CALLER's service repo -> ./service  (the code the harness works on)
-#   2. this harness-engine repo  -> ./engine   (the Python engine under harness/)
+# THREE CHECKOUTS (a reusable workflow brings none of its own files):
+#   1. the CALLER's service repo  -> ./service   (the code the harness works on)
+#   2. this harness-engine repo   -> ./engine    (the Python engine under harness/)
+#   3. copilot-toolkit            -> ./toolkit   (shared skills + instructions)
 #
-# FLAT IMPORTS: the engine modules import each other flatly (e.g.
-# `from boundaries import ...`) and there is no __init__.py, so run.py MUST be
-# executed from INSIDE engine/harness (working-directory). That is why --repo
-# is given relative to engine/harness as ../../service.
+# CENTRAL TOOLKIT MODEL: skills/instructions are NOT committed to service repos
+# (they stay gitignored there). The workflow copies them from the central toolkit
+# into service/.github/ at run time, so the engine finds them at repo_root/.github
+# — present for the run, never committed. One source of truth; update once.
+#
+# FLAT IMPORTS: engine modules import each other flatly (no __init__.py), so run.py
+# is executed from INSIDE engine/harness (working-directory); --repo is ../../service.
 # =============================================================================
 name: Harness (engine)
 
@@ -26,7 +27,6 @@ on:
         required: true
         type: string
       java-version:
-        description: "JDK for the target service build"
         required: false
         default: "17"
         type: string
@@ -39,9 +39,14 @@ on:
         default: "20"
         type: string
       engine_ref:
-        description: "Tag/branch of harness-engine to run (pin for stability)"
+        description: "Tag/branch of harness-engine to run"
         required: false
         default: "v1"
+        type: string
+      toolkit_ref:
+        description: "Tag/branch of copilot-toolkit to load (skills + instructions)"
+        required: false
+        default: "main"
         type: string
     secrets:
       COPILOT_GITHUB_TOKEN:
@@ -70,7 +75,30 @@ jobs:
           ref: ${{ inputs.engine_ref }}
           path: engine
 
-      # --- 3. toolchains ---
+      # --- 3. the central toolkit -> ./toolkit (skills + instructions) ---
+      - name: Checkout copilot-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/copilot-toolkit
+          ref: ${{ inputs.toolkit_ref }}
+          path: toolkit
+
+      # --- 3b. place toolkit skills/instructions into the service checkout ---
+      # The engine loads capability from <service>/.github/skills and
+      # <service>/.github/instructions. We copy them in for THIS run only — they
+      # are never committed back, so the central-toolkit model is preserved.
+      - name: Load toolkit into service workspace
+        run: |
+          mkdir -p service/.github
+          if [ -d toolkit/skills ]; then
+            cp -r toolkit/skills service/.github/
+          fi
+          if [ -d toolkit/instructions ]; then
+            cp -r toolkit/instructions service/.github/
+          fi
+          echo "Loaded skills/instructions from copilot-toolkit@${{ inputs.toolkit_ref }}"
+
+      # --- 4. toolchains ---
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
@@ -88,14 +116,14 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      # --- 4. install deps + Copilot CLI ---
+      # --- 5. install deps + Copilot CLI ---
       - name: Install harness dependencies
         run: pip install -r engine/requirements.txt
 
       - name: Install GitHub Copilot CLI
         run: npm install -g @github/copilot
 
-      # --- 5. run the harness (from inside engine/harness for flat imports) ---
+      # --- 6. run the harness (from inside engine/harness for flat imports) ---
       - name: Initialize run
         working-directory: engine/harness
         env:
@@ -116,7 +144,7 @@ jobs:
         run: |
           python run.py autorun --repo ../../service
 
-      # --- 6. always keep the audit, even on halt ---
+      # --- 7. always keep the audit, even on halt ---
       - name: Collect audit
         if: always()
         working-directory: engine/harness
