@@ -129,8 +129,8 @@ jobs:
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          PYTHONPATH: .
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py init \
             --repo ../../service \
             --feature "${{ inputs.feature_id }}"
@@ -139,12 +139,12 @@ jobs:
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          PYTHONPATH: .
           GIT_AUTHOR_NAME: "harness-bot"
           GIT_AUTHOR_EMAIL: "harness-bot@users.noreply.github.com"
           GIT_COMMITTER_NAME: "harness-bot"
           GIT_COMMITTER_EMAIL: "harness-bot@users.noreply.github.com"
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
 
       # --- 7. always keep the audit, even on halt ---
@@ -153,6 +153,6 @@ jobs:
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          PYTHONPATH: .
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py collect-audit --repo ../../service || true
