@@ -82,6 +82,7 @@ jobs:
           repository: ${{ github.repository_owner }}/copilot-toolkit
           ref: ${{ inputs.toolkit_ref }}
           path: toolkit
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}   # needed: toolkit is a separate private repo
 
       # --- 3b. place toolkit skills/instructions into the service checkout ---
       # The engine loads capability from <service>/.github/skills and
