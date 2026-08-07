@@ -171,7 +171,12 @@ class PhaseExecutor:
             _cfgw = _HCw.load(self.harness_dir, repo_root=self.repo_root)
             _allowed = _cfgw.module_writes(phase.allowed_writes)
             _exclude = _cfgw.write_exclude
-        except Exception:
+            self.log(f"  [module] target_module={_cfgw.target_module!r} "
+                     f"allowed_writes={list(_allowed)} exclude={list(_exclude or [])}")
+        except Exception as _e:
+            import traceback
+            self.log(f"  [module] detection FAILED ({_e!r}) — falling back to un-prefixed scope")
+            self.log("  [module] " + traceback.format_exc().replace(chr(10), " | "))
             _allowed = phase.allowed_writes
             _exclude = None
         for w in result.attempted_writes:
