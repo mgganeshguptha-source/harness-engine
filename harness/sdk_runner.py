@@ -713,6 +713,31 @@ class SdkAgentRunner:
 
         attempted_writes: list[str] = []
 
+        # ---- RESOLVE THE WRITE BOUNDARY ONCE (multi-module, backlog #10) ----
+        # The LIVE interlock below must enforce the SAME boundary the executor
+        # checks post-hoc: module-prefixed allow globs + the always-deny exclude
+        # set (generated code). Previously the callback used the RAW
+        # phase.allowed_writes (un-prefixed, no exclude), so in a multi-module repo
+        # every write to the real application module (e.g.
+        # sample-book-service-application/src/main/**) was denied live — the agent
+        # thrashed and aborted before the executor's correct check ever ran.
+        # Resolve here, close over (eff_allowed, eff_exclude) in the callback.
+        try:
+            from config import HarnessConfig as _HCb
+            _cfgb = _HCb.load(repo_root / ".harness", repo_root=repo_root)
+            eff_allowed = _cfgb.module_writes(phase.allowed_writes)
+            eff_exclude = _cfgb.write_exclude
+            self.log(f"  [module] target_module={_cfgb.target_module!r} "
+                     f"allowed_writes={list(eff_allowed)} "
+                     f"exclude={list(eff_exclude or [])}")
+        except Exception as _e:
+            import traceback
+            self.log(f"  [module] detection FAILED ({_e!r}) — live interlock "
+                     f"falling back to un-prefixed scope")
+            self.log("  [module] " + traceback.format_exc().replace(chr(10), " | "))
+            eff_allowed = phase.allowed_writes
+            eff_exclude = None
+
         # PUSH-MODE REVIEW: build the dossier deterministically BEFORE the SDK
         # call (zero LLM tokens). If it builds, the reviewer gets everything
         # inline and read access is disabled below; if not, legacy pull mode.
@@ -748,8 +773,10 @@ class SdkAgentRunner:
                 path = getattr(request, "file_name", "") or ""
                 attempted_writes.append(path)
                 self.log(f"  . write request: {path}")
-                if not is_write_allowed(path, phase.allowed_writes, repo_root=str(repo_root)):
-                    msg = deny_reason(path, phase.id, phase.allowed_writes, repo_root=str(repo_root))
+                if not is_write_allowed(path, eff_allowed, repo_root=str(repo_root),
+                                        exclude_globs=eff_exclude):
+                    msg = deny_reason(path, phase.id, eff_allowed, repo_root=str(repo_root),
+                                      exclude_globs=eff_exclude)
                     self.log("  ! " + msg)
                     return PermissionDecisionReject(feedback=msg)
                 return PermissionDecisionApproveOnce()
@@ -777,8 +804,9 @@ class SdkAgentRunner:
                           or getattr(request, "path", "")
                           or getattr(request, "file_path", "")
                           or "")
-                if target and is_write_allowed(target, phase.allowed_writes,
-                                               repo_root=str(repo_root)):
+                if target and is_write_allowed(target, eff_allowed,
+                                               repo_root=str(repo_root),
+                                               exclude_globs=eff_exclude):
                     self.log(f"  . read approved (own output file): {target}")
                     return PermissionDecisionApproveOnce()
                 # Unknown/blank path: approve rather than risk strangling the write.
