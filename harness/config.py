@@ -16,6 +16,47 @@ except Exception:
     yaml = None
 
 
+def _module_is_generated(repo_root: Path, module: str) -> bool:
+    """Heuristic: does this module look like GENERATED/openapi code rather than the
+    hand-written application? Naming-independent signals, in priority order:
+
+      1. Its pom.xml runs an OpenAPI/codegen plugin (openapi-generator, swagger-codegen,
+         or a build-helper wiring generated-sources) — the strongest signal.
+      2. Its sources live under a generated-sources path, or every *.java sits in an
+         `api`/`model`/`generated` package with NO Spring wiring (no @SpringBootApplication,
+         @RestController, @Service, @Configuration, @Component).
+
+    A module that has real Spring wiring is the APPLICATION module, not generated.
+    """
+    mpom = repo_root / module / "pom.xml"
+    try:
+        if mpom.exists():
+            ptext = mpom.read_text(encoding="utf-8", errors="replace").lower()
+            for marker in ("openapi-generator", "swagger-codegen", "openapi-generator-maven-plugin",
+                           "generated-sources", "build-helper-maven-plugin"):
+                if marker in ptext:
+                    return True
+    except Exception:
+        pass
+    # Inspect the module's Java sources for Spring wiring.
+    src = repo_root / module / "src" / "main" / "java"
+    try:
+        spring_markers = ("@SpringBootApplication", "@RestController", "@Service",
+                          "@Configuration", "@Component", "@Repository")
+        saw_java = False
+        for jf in src.rglob("*.java"):
+            saw_java = True
+            head = jf.read_text(encoding="utf-8", errors="replace")
+            if any(mk in head for mk in spring_markers):
+                return False  # has Spring wiring => application module, not generated
+        # Java present but ZERO Spring wiring anywhere => looks generated (stubs/DTOs only).
+        if saw_java:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def detect_application_module(repo_root: Path) -> str | None:
     """Auto-detect the application (hand-written) module in a multi-module repo.
 
@@ -26,32 +67,38 @@ def detect_application_module(repo_root: Path) -> str | None:
 
     Strategy (naming-independent):
       1. Read <modules> from the root pom.xml.
-      2. Among those module dirs, pick the one that actually contains
-         src/main/java — that's where hand-written code lives.
-      3. If exactly one qualifies, return it. If none/ambiguous, return None
-         (caller falls back to single-module behaviour or an explicit override).
+      2. Keep modules that contain src/main/java (candidate hand-written code).
+      3. If more than one qualifies, DROP any that look generated (openapi/codegen
+         plugin, or Java with no Spring wiring). This resolves the common
+         two-module case where the generated module also ships .java stubs.
+      4. If exactly one remains, return it. Otherwise None (caller uses the explicit
+         target_module override).
 
-    Returns the module directory name (repo-relative), or None for a single-module
-    repo or when detection is ambiguous.
+    Returns the module directory name (repo-relative), or None when genuinely
+    ambiguous or single-module.
     """
     try:
         root_pom = repo_root / "pom.xml"
         if not root_pom.exists():
             return None
         text = root_pom.read_text(encoding="utf-8", errors="replace")
-        # Only aggregator POMs have <modules>; single-module repos won't.
         mods = re.findall(r"<module>\s*([^<]+?)\s*</module>", text)
         if not mods:
             return None
-        # Keep only modules whose dir actually holds hand-written main sources.
-        app_like = []
+        candidates = []
         for m in mods:
             m = m.strip().strip("/")
             if (repo_root / m / "src" / "main" / "java").is_dir():
-                app_like.append(m)
-        if len(app_like) == 1:
-            return app_like[0]
-        # Ambiguous (0 or >1): let the caller decide / use an explicit override.
+                candidates.append(m)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            # Disambiguate: drop modules that look generated.
+            non_generated = [m for m in candidates
+                             if not _module_is_generated(repo_root, m)]
+            if len(non_generated) == 1:
+                return non_generated[0]
+        # Still ambiguous (0, or >1 real app modules): use explicit override.
         return None
     except Exception:
         return None
