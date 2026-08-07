@@ -147,7 +147,7 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
 
-      # --- 7. always keep the audit, even on halt ---
+      # --- 7. collect audit files into service/audit/ (local copy) ---
       - name: Collect audit
         if: always()
         working-directory: engine/harness
@@ -156,3 +156,50 @@ jobs:
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py collect-audit --repo ../../service || true
+
+      # --- 8. push the audit trail to a branch — ALWAYS (success OR halt) ---
+      # This is what makes the run inspectable: context.md, capability-manifest,
+      # run-summary land on harness-audit/<feature>-<run_id> every time.
+      - name: Commit audit trail to a branch (always)
+        if: always()
+        working-directory: service
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          AUDIT_BRANCH="harness-audit/${FEATURE}-${{ github.run_id }}"
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          git checkout -b "$AUDIT_BRANCH"
+          git add audit/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No audit files to commit (collect-audit produced nothing)."
+          else
+            STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
+            git commit -m "Harness audit [$FEATURE] status=$STATUS (run ${{ github.run_id }})"
+            git push origin "$AUDIT_BRANCH"
+            echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
+          fi
+
+      # --- 9. raise the code PR — ONLY on success ---
+      - name: Open pull request with the change (success only)
+        if: success()
+        working-directory: service
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          BRANCH="harness/${FEATURE}-${{ github.run_id }}"
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          # return to the checked-out commit first (audit step left us on the audit branch)
+          git checkout "${{ github.sha }}" 2>/dev/null || git checkout main
+          git checkout -b "$BRANCH"
+          git add -A 2>/dev/null || true
+          git commit -m "Harness: $FEATURE" || echo "nothing to commit"
+          git push origin "$BRANCH"
+          if [ -f .harness/pr-body.md ]; then
+            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base main --head "$BRANCH" || echo "PR create skipped"
+          else
+            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base main --head "$BRANCH" || echo "PR create skipped"
+          fi
