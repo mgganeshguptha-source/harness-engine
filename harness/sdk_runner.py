@@ -360,15 +360,43 @@ def _run_git(repo_root: Path, *args: str) -> str:
         return ""
 
 
+def _module_prefix(repo_root: Path) -> str:
+    """Return the application module dir (with trailing slash) for a multi-module
+    repo, or '' for a single-module repo (petclinic).
+
+    The dossier builders and phase-prompt paths were hardcoded to 'src/main' /
+    'src/test', which resolve to the REPO ROOT. In a BCBSM aggregator repo the
+    real code lives under <app-module>/src/main, so those git-scoped paths matched
+    NOTHING and the review/unit-test push-mode dossiers silently fell back to
+    expensive, non-deterministic pull mode. Resolve the module the same way the
+    write-boundary interlock does, so every source path agrees.
+    """
+    try:
+        from config import HarnessConfig
+        cfg = HarnessConfig.load(repo_root / ".harness", repo_root=repo_root)
+        return f"{cfg.target_module}/" if cfg.target_module else ""
+    except Exception:
+        return ""
+
+
+def _src_main(repo_root: Path) -> str:
+    return f"{_module_prefix(repo_root)}src/main"
+
+
+def _src_test(repo_root: Path) -> str:
+    return f"{_module_prefix(repo_root)}src/test"
+
+
 def _build_review_dossier(repo_root: Path, log=print) -> str | None:
     """Assemble the inline review material. Returns None if nothing changed
     (or git failed) — caller falls back to legacy pull-mode review."""
-    diff = _run_git(repo_root, "diff", "HEAD", "--", "src/main")
+    src_main = _src_main(repo_root)  # <module>/src/main in multi-module, else src/main
+    diff = _run_git(repo_root, "diff", "HEAD", "--", src_main)
     tracked = [ln.strip() for ln in _run_git(
-        repo_root, "diff", "HEAD", "--name-only", "--", "src/main"
+        repo_root, "diff", "HEAD", "--name-only", "--", src_main
     ).splitlines() if ln.strip()]
     untracked = [ln.strip() for ln in _run_git(
-        repo_root, "ls-files", "--others", "--exclude-standard", "--", "src/main"
+        repo_root, "ls-files", "--others", "--exclude-standard", "--", src_main
     ).splitlines() if ln.strip()]
     changed = list(dict.fromkeys(tracked + untracked))  # de-dupe, keep order
     if not changed:
@@ -426,11 +454,12 @@ def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
     With all of that inline there is no legitimate reason to read, and the
     caller denies reads for this phase (see on_permission_request).
     """
+    src_main = _src_main(repo_root)  # <module>/src/main in multi-module, else src/main
     tracked = [ln.strip() for ln in _run_git(
-        repo_root, "diff", "HEAD", "--name-only", "--", "src/main"
+        repo_root, "diff", "HEAD", "--name-only", "--", src_main
     ).splitlines() if ln.strip()]
     untracked = [ln.strip() for ln in _run_git(
-        repo_root, "ls-files", "--others", "--exclude-standard", "--", "src/main"
+        repo_root, "ls-files", "--others", "--exclude-standard", "--", src_main
     ).splitlines() if ln.strip()]
     changed = list(dict.fromkeys(tracked + untracked))
     if not changed:
@@ -459,13 +488,26 @@ def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
 
     # --- existing tests for the SAME package: conventions + fixtures + base classes.
     # This is what the agent was grepping/reading for. Push it instead.
-    test_root = repo_root / "src" / "test"
+    # Anchor on the module's own src/test (multi-module) or repo-root src/test.
+    test_root = repo_root / _module_prefix(repo_root).rstrip("/") / "src" / "test" \
+        if _module_prefix(repo_root) else repo_root / "src" / "test"
     if test_root.is_dir():
-        # packages touched by the change, e.g. .../petclinic/owner
+        # packages touched by the change, e.g. .../petclinic/owner. Derive the
+        # package path by finding 'src/main/java' positionally rather than
+        # assuming a fixed depth — the module prefix shifts every index.
         pkg_dirs: list[Path] = []
         for rel in changed:
-            pkg = Path(rel).parent                       # src/main/java/<pkg...>
-            rest = pkg.parts[3:] if len(pkg.parts) > 3 else ()  # strip src/main/java
+            pkg = Path(rel).parent
+            parts = pkg.parts
+            try:
+                i = parts.index("java")
+                # require it to be the src/main/java segment
+                if i >= 2 and parts[i - 2:i] == ("src", "main"):
+                    rest = parts[i + 1:]
+                else:
+                    rest = ()
+            except ValueError:
+                rest = ()
             cand = test_root / "java" / Path(*rest) if rest else None
             if cand and cand.is_dir() and cand not in pkg_dirs:
                 pkg_dirs.append(cand)
@@ -526,10 +568,15 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     """
     story = run.story
     rr = str(repo_root).replace("\\", "/").rstrip("/")
+    # In a multi-module repo the hand-written code lives under <app-module>/src/...,
+    # not repo-root/src/... Tell the agent the ACTUAL module-relative paths so its
+    # own-file reads/writes and the "do not touch src/test" guidance all line up
+    # with the write-boundary interlock.
+    _mod = _module_prefix(repo_root)  # '<module>/' or ''
     ctx_dir = f"{rr}/.github/story-context-files"
     plan_file = f"{rr}/.harness/prompt-steps.md"
-    src_main = f"{rr}/src/main"
-    src_test = f"{rr}/src/test"
+    src_main = f"{rr}/{_mod}src/main"
+    src_test = f"{rr}/{_mod}src/test"
     docs_dir = f"{rr}/docs"
     pr_body = f"{rr}/.harness/pr-body.md"
 
