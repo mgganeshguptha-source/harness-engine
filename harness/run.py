@@ -125,25 +125,25 @@ def cmd_autorun(args):
 
 
 def _report_actual_credits(before, after):
-    """Print the REAL credit delta, or say plainly that it could not be read.
+    """Print the REAL credit delta and its cost, or say plainly that it failed.
 
-    Printed after _report() so the estimate and the actual sit together and can be
-    compared at a glance — that comparison is what recalibrates the estimate.
+    This is the ONLY cost figure the harness reports. The per-token estimate was
+    removed: two cost numbers in one report invite the wrong one being quoted, and
+    this one is GitHub's own.
     """
     print()
     if before is None or after is None:
-        print("  ACTUAL AI CREDITS: unable to read from GitHub's billing API.")
-        print("  Verify manually at github.com/settings/copilot/features")
-        print("    -> Usage / 'Included usage'. Take the credits-used figure")
-        print("       immediately before and after the run and subtract.")
-        print("  (Needs a fine-grained PAT with 'Plan' user permission (read).")
-        print("   Not available where Copilot is billed via an org/enterprise —")
-        print("   use the org billing endpoint or GitHub Billing directly.)")
+        print("  Unable to fetch the ai credits usage due to api failure, "
+              "refer to github.com for actual credit used")
+        print("  (github.com/settings/copilot/features -> Usage / 'Included usage'.")
+        print("   Needs a fine-grained PAT with 'Plan' user permission (read);")
+        print("   unavailable where Copilot is billed via an org/enterprise.)")
         return
 
     delta = after - before
     print(f"  ACTUAL AI CREDITS USED THIS RUN: {delta:.2f} "
-          f"(billing counter {before:.2f} -> {after:.2f})")
+          f"(≈ ${delta * 0.01:.4f})   [1 credit = $0.01]")
+    print(f"  billing counter {before:.2f} -> {after:.2f}")
     if delta < 0:
         # Only happens across a billing-period reset mid-run.
         print("  ! negative delta — the billing period reset during this run;")
@@ -151,7 +151,7 @@ def _report_actual_credits(before, after):
     elif delta == 0:
         print("  ! zero delta — GitHub's counter may not have caught up yet.")
         print("    Re-check github.com/settings/copilot/features in a few minutes.")
-    print("  This is GitHub's own figure, not the token-priced estimate above.")
+    print("  Source: GitHub billing API (consumed credits, gross of the included allowance).")
     print("  Valid only if this account made no other Copilot requests during the run.")
 
 
@@ -232,28 +232,19 @@ def cmd_collect_audit(args):
         "completed_phases": run.completed_phases,
         "total_tokens": run.total_tokens,
         "phase_token_log": run.phase_token_log,
-        # The cost figures in phase_token_log are ESTIMATES. Ship the caveat with
-        # the data so nobody downstream reads them as a bill.
-        "cost_estimate_disclaimer": {
-            "is_estimate": True,
-            "basis": "per-token pricing from GitHub's published usage-based rates; "
-                     "1 AI credit = $0.01. No model is free under usage-based "
-                     "billing (incl. gpt-5-mini).",
-            "calibration": "measured against GitHub Billing on 2 runs: 14.5/16 (91%) "
-                           "and 25.3/27 (94%) — tends to run slightly UNDER actual",
-            "known_divergences": [
-                "cache-write tokens are counted but NOT priced — pricing them was "
-                "measured to overshoot actual billing badly (136%)",
-                "token classes the SDK may report differently from how GitHub bills",
-                "published rates may have changed since this config was updated",
-                "phases whose model has no configured rate are excluded from totals",
-            ],
-            "direction": "approximate LOWER BOUND (~90-95% of actual)",
-            "authoritative_source": "GitHub Billing — AI-credit balance delta "
-                                    "before/after the run "
-                                    "(github.com/settings/copilot/features)",
-            "rates_reference": "https://docs.github.com/en/copilot/reference/"
-                               "copilot-billing/models-and-pricing",
+        # Cost is NOT derived from tokens. The authoritative figure is the
+        # GitHub billing-API credit delta printed at the end of the run; token
+        # counts are retained only to show which phase consumed what.
+        "cost_source": {
+            "is_estimate": False,
+            "basis": "GitHub billing API — consumed AI credits (grossQuantity), "
+                     "read once before and once after the run. 1 credit = $0.01.",
+            "endpoint": "GET /users/{username}/settings/billing/ai_credit/usage",
+            "caveat": "The delta is account-wide: it is accurate only while this "
+                      "account makes no other Copilot requests during the run.",
+            "unavailable_when": "Copilot licence billed via an org/enterprise "
+                                "(user-level endpoint returns no usage), or the "
+                                "token lacks 'Plan' user permission (read).",
         },
     }
     (audit_dir / "run-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -277,63 +268,20 @@ def _report(run: RunState):
     print(f"status  : {run.status}")
     print(f"done    : {run.completed_phases}")
 
-    # per-phase token breakdown with running totals + cost estimate
+    # Per-phase TOKEN breakdown. No cost estimate: actual credits are read from
+    # GitHub's billing API before/after the run (see _report_actual_credits), so a
+    # second, token-priced guess would only invite the two figures to be confused.
+    # Tokens are still shown per phase because they are what makes a phase runaway
+    # visible — which loop burned the budget — and that is independent of pricing.
     if run.phase_token_log:
-        print("\n  token usage & estimated cost by phase:")
-        total_credits = 0.0
-        any_unknown = False
-        any_partial = False
+        print("\n  token usage by phase:")
         for e in run.phase_token_log:
             model = f"[{e.get('model','')}]"
-            if e.get("est_credits") is not None:
-                cost = f"~{e['est_credits']:.1f} cr (~${e['est_usd']:.4f})"
-                total_credits += e["est_credits"]
-                if e.get("partial"):
-                    cost += " *"; any_partial = True
-            else:
-                cost = "rate unknown"; any_unknown = True
             print(f"    {e['phase']:<14}{model:<22} "
-                  f"{e['phase_tokens']:>7} tok   {cost}")
-        approx = "≈" if not (any_unknown or any_partial) else "≳"
-        print(f"\n  estimated run cost: {approx} {total_credits:.1f} AI credits "
-              f"(≈ ${total_credits * 0.01:.4f})   [1 credit = $0.01]")
-        if any_partial:
-            print(f"  * partial: this model bills cache-WRITE tokens, but none were")
-            print(f"    reported by the SDK for that phase — its real charge is HIGHER.")
-        if any_unknown:
-            print(f"  ! one or more models have no published rate in config; those")
-            print(f"    phases are EXCLUDED from the total above.")
+                  f"{e['phase_tokens']:>7} tok")
 
-        # ---------------- DISCLAIMER ----------------
-        # Calibrated against two real runs (est vs GitHub Billing credit delta):
-        #   run 29174592092: 14.5 est / 16 billed  (91%)
-        #   run 29181773991: 25.3 est / 27 billed  (94%)
-        # State the measured band and the direction; do not overclaim precision.
-        print("\n  ---------------------------------------------------------------")
-        print("  DISCLAIMER — this is an ESTIMATE, not the billed amount.")
-        print("  Priced per-token from GitHub's published usage-based rates")
-        print("  (1 credit = $0.01). Under usage-based billing NO model is free —")
-        print("  gpt-5-mini is billed too.")
-        print("  Calibration: on the runs measured so far this estimate has landed")
-        print("  at roughly 90-95% of the actual billed credits, i.e. it tends to")
-        print("  run SLIGHTLY UNDER. Treat it as an approximate LOWER BOUND.")
-        print("  Known sources of divergence:")
-        print("    - token classes the SDK reports differently from how GitHub bills")
-        print("      (cache-write tokens are counted but deliberately NOT priced —")
-        print("       pricing them was measured to overshoot badly)")
-        print("    - published rates changing after this config was last updated")
-        print("    - phases whose model has no rate in config (excluded entirely)")
-        print("  Use it to spot runaway phases — NOT as a billing figure, and not")
-        print("  for client reporting. For ACTUAL usage and cost, use GitHub Billing:")
-        print("    github.com/settings/copilot/features  (personal account)")
-        print("    -> Usage / 'View details', or take the AI-credit balance")
-        print("       delta immediately before and after the run.")
-        print("  Rates: docs.github.com/en/copilot/reference/copilot-billing/"
-              "models-and-pricing")
-        print("  ---------------------------------------------------------------")
-
-    # token + rough credit estimate (1 credit = $0.01; tokens priced per-model,
-    # so this is an INDICATIVE total, not the billed amount — confirm in GitHub billing)
+    # Aggregate token counts. Cost is NOT derived from these — the billed figure
+    # comes from GitHub's billing API delta printed below.
     tk = run.total_tokens or {}
     tin, tout = tk.get("input", 0), tk.get("output", 0)
     if tin or tout:
@@ -341,8 +289,7 @@ def _report(run: RunState):
               f"cache_read={tk.get('cache_read', 0)} "
               f"cache_write={tk.get('cache_write', 0)} "
               f"reasoning={tk.get('reasoning', 0)}")
-        print(f"          total billable tokens (in+out) = {tin + tout}")
-        print(f"          (see GitHub Billing for the exact AI-credit charge)")
+        print(f"          total tokens (in+out) = {tin + tout}")
 
     if run.status == "awaiting_approval":
         print(f"\n>>> Phase '{run.current_phase}' awaits your review.")
