@@ -44,6 +44,15 @@ class Phase:
     # Deterministic setup so the agent never needs shell to mkdir. These dirs must
     # fall within the phase's allowed_writes.
     pre_create_dirs: tuple = field(default_factory=tuple)
+    # Files (repo-relative) the HARNESS deletes BEFORE the phase runs, so that a
+    # fresh write is the only way the artifact can exist afterwards.
+    #
+    # This is what makes a "was it written THIS attempt?" gate sound. Without it a
+    # retry can silently inherit the previous attempt's file: in run 31235571294 the
+    # reviewer read the existing review.md, judged its PASS still accurate, wrote
+    # nothing, and the gate correctly-but-unhelpfully halted on STALE VERDICT.
+    # Only paths inside the phase's own allowed_writes belong here.
+    clear_before_run: tuple = field(default_factory=tuple)
     # If True, after this phase the harness scans the context output for
     # [NEEDS CLARIFICATION] markers and halts (needs_input) if any remain.
     scan_clarifications: bool = False
@@ -103,6 +112,10 @@ PHASES = (
         # not edit the code it is judging.
         allowed_writes=(".harness/**",),
         required_artifact=".harness/review.md",
+        # Delete last attempt's verdict first: the review gate asserts the reviewer
+        # wrote a verdict for THIS code, and a surviving file makes a live PASS
+        # indistinguishable from a stale one.
+        clear_before_run=(".harness/review.md",),
         human_gate=False,                           # review gate (harness-owned) follows
         max_iterations=8,
         review_gate=True,                           # harness parses verdict, may loop to coding

@@ -86,6 +86,19 @@ def cmd_autorun(args):
     repo = Path(args.repo).resolve()
     run = _load(repo)
     sm = _build_machine(repo, real=True, model=getattr(args, "model", None))
+
+    # ACTUAL credit consumption: one read before the first phase, one after the
+    # last. The delta is the only trustworthy figure available — GitHub exposes an
+    # account-level counter, not per-request costs, so per-phase attribution stays
+    # an estimate. The delta is valid only while this account is the sole consumer
+    # during the run; concurrent Copilot use elsewhere would inflate it.
+    credits_before = None
+    try:
+        from ai_credits import read_credits_used
+        credits_before = read_credits_used(log=print)
+    except Exception:
+        credits_before = None
+
     max_cycles = 50
     for _ in range(max_cycles):
         run = sm.run_until_pause(run)
@@ -94,11 +107,52 @@ def cmd_autorun(args):
             run = sm.resolve_gate(run, approved=True)
         elif run.status in ("done", "halted", "needs_input"):
             break
+
+    credits_after = None
+    if credits_before is not None:
+        try:
+            from ai_credits import read_credits_used
+            credits_after = read_credits_used(log=print)
+        except Exception:
+            credits_after = None
+
     _report(run)
+    _report_actual_credits(credits_before, credits_after)
     # exit non-zero if the harness halted or needs human input (CI job fails visibly)
     if run.status in ("halted", "needs_input"):
         import sys as _sys
         _sys.exit(1)
+
+
+def _report_actual_credits(before, after):
+    """Print the REAL credit delta, or say plainly that it could not be read.
+
+    Printed after _report() so the estimate and the actual sit together and can be
+    compared at a glance — that comparison is what recalibrates the estimate.
+    """
+    print()
+    if before is None or after is None:
+        print("  ACTUAL AI CREDITS: unable to read from GitHub's billing API.")
+        print("  Verify manually at github.com/settings/copilot/features")
+        print("    -> Usage / 'Included usage'. Take the credits-used figure")
+        print("       immediately before and after the run and subtract.")
+        print("  (Needs a fine-grained PAT with 'Plan' user permission (read).")
+        print("   Not available where Copilot is billed via an org/enterprise —")
+        print("   use the org billing endpoint or GitHub Billing directly.)")
+        return
+
+    delta = after - before
+    print(f"  ACTUAL AI CREDITS USED THIS RUN: {delta:.2f} "
+          f"(billing counter {before:.2f} -> {after:.2f})")
+    if delta < 0:
+        # Only happens across a billing-period reset mid-run.
+        print("  ! negative delta — the billing period reset during this run;")
+        print("    treat the figure above as unreliable and check GitHub Billing.")
+    elif delta == 0:
+        print("  ! zero delta — GitHub's counter may not have caught up yet.")
+        print("    Re-check github.com/settings/copilot/features in a few minutes.")
+    print("  This is GitHub's own figure, not the token-priced estimate above.")
+    print("  Valid only if this account made no other Copilot requests during the run.")
 
 
 def cmd_approve(args):
