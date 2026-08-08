@@ -489,8 +489,8 @@ def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
     # --- existing tests for the SAME package: conventions + fixtures + base classes.
     # This is what the agent was grepping/reading for. Push it instead.
     # Anchor on the module's own src/test (multi-module) or repo-root src/test.
-    test_root = repo_root / _module_prefix(repo_root).rstrip("/") / "src" / "test" \
-        if _module_prefix(repo_root) else repo_root / "src" / "test"
+    test_root = ((repo_root / _module_prefix(repo_root).rstrip("/") / "src" / "test")
+                 if _module_prefix(repo_root) else (repo_root / "src" / "test"))
     if test_root.is_dir():
         # packages touched by the change, e.g. .../petclinic/owner. Derive the
         # package path by finding 'src/main/java' positionally rather than
@@ -498,12 +498,12 @@ def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
         pkg_dirs: list[Path] = []
         for rel in changed:
             pkg = Path(rel).parent
-            parts = pkg.parts
+            seg = pkg.parts
             try:
-                i = parts.index("java")
+                i = seg.index("java")
                 # require it to be the src/main/java segment
-                if i >= 2 and parts[i - 2:i] == ("src", "main"):
-                    rest = parts[i + 1:]
+                if i >= 2 and seg[i - 2:i] == ("src", "main"):
+                    rest = seg[i + 1:]
                 else:
                     rest = ()
             except ValueError:
