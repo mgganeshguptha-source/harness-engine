@@ -77,6 +77,30 @@ class PhaseExecutor:
             except Exception as e:
                 self.log(f"  [harness] could not create dir {d}: {e}")
 
+        # STALE-ARTIFACT GUARD: remove the phase's own verdict/output file before
+        # the agent runs, so a fresh write is the ONLY way it can exist afterwards.
+        #
+        # Without this, a retry loop can silently reuse a previous attempt's file.
+        # Observed in run 31235571294: attempt 1 wrote review.md with VERDICT: PASS;
+        # a later coding loop re-entered code_review, the reviewer READ the existing
+        # review.md, judged it still accurate, and wrote nothing ("The review file
+        # already exists and contains a comprehensive VERDICT: PASS analysis").
+        # The gate then correctly reported STALE VERDICT and halted — a live, correct
+        # review was indistinguishable from a stale one because the artifact predated
+        # the attempt. Deleting it first makes "file exists" == "reviewer wrote it
+        # this attempt", which is exactly what the gate is asserting.
+        #
+        # Only files the phase is allowed to write are cleared, so this can never
+        # remove source or a different phase's artifact.
+        for rel in getattr(phase, "clear_before_run", ()):
+            stale = self.repo_root / rel
+            try:
+                if stale.is_file():
+                    stale.unlink()
+                    self.log(f"  [harness] cleared stale artifact: {rel}")
+            except Exception as e:
+                self.log(f"  [harness] could not clear {rel}: {e}")
+
         # SCOPE GATE (part 1/2): snapshot which production source files exist
         # BEFORE the agent runs. After the phase we compare, so "the agent CREATED
         # this file" is a fact rather than an inference. Only needed for phases that

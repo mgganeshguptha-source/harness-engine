@@ -607,7 +607,13 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"  - You may add free-form notes after the issues.\n"
         f"Be strict about production-code correctness, safety, and standards — but if the "
         f"only thing you could fault is test coverage, the verdict is PASS. "
-        f"Write ONLY {rr}/.harness/review.md."
+        f"Write ONLY {rr}/.harness/review.md.\n"
+        f"MANDATORY: you MUST write review.md on THIS attempt, as a full overwrite, "
+        f"even if a review file already exists and even if you agree with it. A "
+        f"pre-existing verdict is from an EARLIER attempt against DIFFERENT code and "
+        f"is treated as stale — the run HALTS if you do not write the file now. "
+        f"Never skip the write on the grounds that the existing review looks correct "
+        f"or complete; re-state your verdict in full."
     )
     if review_dossier is not None:
         code_review_task = (
