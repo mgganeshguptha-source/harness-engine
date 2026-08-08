@@ -365,22 +365,30 @@ class HarnessConfig:
     def module_writes(self, allowed_globs) -> tuple:
         """Rewrite a phase's allowed_writes for a multi-module repo (Option A).
 
-        Module-relative globs (src/main/**, src/test/**, docs/**) are prefixed with
-        the detected application module so writes land in <module>/src/main/** rather
-        than the repo root. Globs already anchored (starting with '.harness', '.github',
-        or the module name, or containing a '/') are left untouched.
+        Only genuinely MODULE-SCOPED globs are prefixed: Java source and build
+        output live inside the module that owns them, so src/main/**, src/test/**
+        and target/** must become <module>/src/main/** etc.
+
+        Repo-LEVEL artefacts are NOT prefixed. `docs/**` belongs to the repository,
+        not to one Maven module — an aggregator repo has a single docs/ tree at the
+        root describing the whole service. Prefixing it sent the documentation phase
+        looking for <module>/docs/**, so the agent's correct write to docs/<story>.md
+        was denied as a boundary violation (observed run 31238791178). The same
+        reasoning already keeps .harness/** and .github/** at the root.
 
         Single-module repos (target_module empty) are unchanged — petclinic still works.
         """
         if not self.target_module:
             return tuple(allowed_globs)
-        MODULE_RELATIVE = ("src/main/", "src/test/", "src/", "docs/")
+        # Module-scoped ONLY: source trees and build output. Do NOT add repo-level
+        # artefact dirs (docs/, .harness/, .github/) here.
+        MODULE_RELATIVE = ("src/main/", "src/test/", "src/", "target/")
         out = []
         for g in allowed_globs:
             if any(g.startswith(pfx) for pfx in MODULE_RELATIVE):
                 out.append(f"{self.target_module}/{g}")
             else:
-                out.append(g)  # .harness/**, .github/**, etc. stay repo-root-relative
+                out.append(g)  # docs/**, .harness/**, .github/** stay repo-root-relative
         return tuple(out)
 
     def resolved_coverage_csv(self, repo_root: Path) -> Path | None:
