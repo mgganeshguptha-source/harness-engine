@@ -373,6 +373,113 @@ class HarnessConfig:
                 out.append(g)  # .harness/**, .github/**, etc. stay repo-root-relative
         return tuple(out)
 
+    def resolved_coverage_csv(self, repo_root: Path) -> Path | None:
+        """Locate the JaCoCo CSV, module-aware, WITHOUT hardcoding a module name.
+
+        `coverage_csv` is configured module-relative (target/site/jacoco/jacoco.csv)
+        because that is where JaCoCo writes it *within a module*. In a single-module
+        repo that is also the repo root, so the raw value works. In an aggregator
+        repo the real file is <app-module>/target/site/jacoco/jacoco.csv, and reading
+        the un-prefixed path finds nothing — the coverage gate then reports
+        'unmeasurable' and loops until retries exhaust even though tests are green.
+
+        Resolution order (first hit wins):
+          1. the configured path as-is (absolute, or single-module repo root)
+          2. the configured path prefixed with the detected application module
+          3. the configured path under any <module>/ named in the root pom
+          4. a bounded rglob for the configured FILENAME anywhere under the repo,
+             preferring the application module, then the shallowest match
+
+        Step 4 is the safety net: it survives an unusual JaCoCo outputDirectory, an
+        aggregated report module, or a layout this code has not seen. Returns None
+        only when the file genuinely does not exist (JaCoCo not configured/not run),
+        which is a real, actionable failure rather than a path bug.
+        """
+        configured = Path(self.coverage_csv)
+        if configured.is_absolute() and configured.is_file():
+            return configured
+
+        # 1. as configured, relative to the repo root (single-module case)
+        cand = repo_root / configured
+        if cand.is_file():
+            return cand
+
+        # 2. prefixed with the detected application module
+        if self.target_module:
+            cand = repo_root / self.target_module / configured
+            if cand.is_file():
+                return cand
+
+        # 3. any module declared in the root pom (covers a dedicated report module)
+        for mod in self._pom_modules(repo_root):
+            cand = repo_root / mod / configured
+            if cand.is_file():
+                return cand
+
+        # 4. last resort: find the file by name, preferring the app module, then
+        #    the shallowest path (avoids picking a nested/aggregated duplicate).
+        name = configured.name
+        try:
+            matches = [p for p in repo_root.rglob(name) if p.is_file()]
+        except Exception:
+            matches = []
+        if matches:
+            def _rank(p: Path):
+                try:
+                    rel = p.relative_to(repo_root)
+                except Exception:
+                    return (2, 99, str(p))
+                in_app = (self.target_module
+                          and rel.parts and rel.parts[0] == self.target_module)
+                return (0 if in_app else 1, len(rel.parts), str(rel))
+            return sorted(matches, key=_rank)[0]
+
+        return None
+
+    @staticmethod
+    def _pom_modules(repo_root: Path) -> list:
+        """<module> entries from the root pom, or [] if none/unreadable."""
+        try:
+            root_pom = repo_root / "pom.xml"
+            if not root_pom.exists():
+                return []
+            text = root_pom.read_text(encoding="utf-8", errors="replace")
+            return [m.strip().strip("/") for m in
+                    re.findall(r"<module>\s*([^<]+?)\s*</module>", text) if m.strip()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def source_to_class_key(rel_path: str) -> tuple | None:
+        """Map a repo-relative .java source path to (package, ClassName) for CSV
+        lookup — module-agnostic.
+
+        JaCoCo's CSV keys rows by PACKAGE + CLASS, not by file path, so the gate has
+        to derive the fully-qualified name from the changed-file path. Deriving it by
+        a FIXED path depth (e.g. parts[3:] to skip src/main/java) breaks the moment a
+        module directory sits in front, which is exactly the multi-module case: the
+        derived package comes out wrong and every changed class silently misses in
+        the CSV — indistinguishable from 'no coverage data'.
+
+        Anchor on the 'src/main/java' segment positionally instead, so the same code
+        works for src/main/java/... and <any-module>/src/main/java/... alike.
+        Returns None for paths that are not main Java sources.
+        """
+        norm = str(rel_path).replace("\\", "/")
+        if not norm.endswith(".java"):
+            return None
+        seg = norm.split("/")
+        idx = None
+        for i in range(len(seg) - 2):
+            if seg[i] == "src" and seg[i + 1] == "main" and seg[i + 2] == "java":
+                idx = i + 3
+                break
+        if idx is None or idx >= len(seg):
+            return None
+        pkg_parts = seg[idx:-1]
+        class_name = seg[-1][:-len(".java")]
+        return (".".join(pkg_parts), class_name)
+
     def model_for_phase(self, phase_id: str) -> str:
         """Model for a phase: phase_models[phase_id] if set, else the default.
         For 'code_review', review_model wins when set (independent reviewer)."""
