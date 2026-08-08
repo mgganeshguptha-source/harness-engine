@@ -19,6 +19,7 @@ fake executor — zero SDK, zero credits. That is the claude-shepherd AgentRunne
 one layer up.
 """
 from __future__ import annotations
+import re
 import time
 from pathlib import Path
 from typing import Protocol
@@ -46,6 +47,55 @@ _HALTING = {
     ExitCode.SDK_ERROR,
     ExitCode.CONFIG_ERROR,
 }
+
+
+# Maven paths/goals that identify a failure as belonging to TEST sources.
+_TEST_PATH = re.compile(r"[/\\]src[/\\]test[/\\]", re.IGNORECASE)
+_TEST_GOAL = re.compile(r"(maven-compiler-plugin[^\n]*?:testCompile"
+                        r"|:testCompile\b"
+                        r"|Failed to execute goal[^\n]*testCompile)", re.IGNORECASE)
+_MAIN_PATH = re.compile(r"[/\\]src[/\\]main[/\\]", re.IGNORECASE)
+
+
+def _failure_is_in_tests(output: str) -> bool:
+    """True when a red build is the TEST code's fault rather than production code's.
+
+    Deliberately CONSERVATIVE: it returns True only when there is positive evidence
+    of a test-side compilation problem AND no evidence of a main-side one. Getting
+    this wrong in the permissive direction is the dangerous case — routing a genuine
+    production defect to the unit_testing phase invites the tests to be bent until
+    they pass, which is precisely the failure mode the frozen-main interlock exists
+    to prevent. When the signal is mixed or absent, fall back to the historical
+    behaviour (production code is at fault) so the mirror interlock still holds.
+
+    Note this is about COMPILATION ownership, not about assertions failing. A test
+    that compiles but fails its assertion is left routed to 'coding': a red
+    assertion is the normal signal that production code is wrong, and that is the
+    whole point of the gate.
+    """
+    if not output:
+        return False
+    text = str(output)
+
+    compile_failure = ("COMPILATION ERROR" in text.upper()
+                       or "Compilation failure" in text
+                       or "cannot find symbol" in text
+                       or "no suitable method found" in text
+                       or "is ambiguous" in text)
+    if not compile_failure:
+        # Assertion failures and runtime errors stay with 'coding' — see docstring.
+        return False
+
+    error_lines = [ln for ln in text.splitlines() if "[ERROR]" in ln]
+    scope = "\n".join(error_lines) if error_lines else text
+
+    test_hits = len(_TEST_PATH.findall(scope))
+    main_hits = len(_MAIN_PATH.findall(scope))
+
+    if _TEST_GOAL.search(text) and main_hits == 0:
+        return True
+    # Require test evidence and NO main evidence before diverting.
+    return test_hits > 0 and main_hits == 0
 
 
 class StateMachine:
@@ -346,21 +396,45 @@ class StateMachine:
                         return run
 
                     # ============================================================
-                    # TEST FAILURE (red): loop back to coding to FIX SOURCE.
-                    # Existing behaviour / existing retry budget.
+                    # BUILD/TEST FAILURE (red): loop back to whichever phase OWNS
+                    # the broken file.
+                    #
+                    # Historically this always went to 'coding' with feedback that
+                    # said "Do not edit tests". That is correct when production code
+                    # is at fault, and actively harmful when the TEST is the thing
+                    # that will not compile: 'coding' may only write src/main, so it
+                    # structurally CANNOT fix a broken test. Observed in run
+                    # 31253969777 — a reactive WebClient mock in
+                    # CatalogClientImplUnitTest failed to compile on Mockito generic
+                    # wildcards; the harness sent it to 'coding' three times, which
+                    # flailed at production code and even invented a duplicate
+                    # BookController in the wrong package, then halted with the
+                    # retry budget spent and the actual defect untouched.
                     # ============================================================
                     run.validation_attempts += 1
-                    loopback = cfg.validation_loopback_phase
+                    test_side = _failure_is_in_tests(vr.output_tail)
+                    if test_side:
+                        loopback = cfg.test_failure_loopback_phase
+                        fix_instruction = (
+                            "The build FAILED while compiling or running the TESTS. "
+                            "The defect is in the TEST code, not the production code. "
+                            "Fix the test source so it compiles and passes. Do NOT ask "
+                            "for production code changes. Failure output:\n"
+                        )
+                    else:
+                        loopback = cfg.validation_loopback_phase
+                        fix_instruction = (
+                            "The test build FAILED. Fix the production code so tests pass. "
+                            "Do not edit tests. Failure output:\n"
+                        )
                     if loopback and run.validation_attempts <= cfg.max_validation_retries:
                         # CONDITIONAL TRANSITION (known edge, not dynamic):
-                        # tests red -> go back to the coding phase carrying the failure
-                        # as feedback, and let it fix + re-validate.
-                        self.log(f"  ! VALIDATION_FAILED — looping back to '{loopback}' "
+                        # red build -> back to the phase that owns the broken file,
+                        # carrying the failure as feedback, and let it fix + re-validate.
+                        self.log(f"  ! VALIDATION_FAILED ({'test-side' if test_side else 'main-side'}) "
+                                 f"— looping back to '{loopback}' "
                                  f"(attempt {run.validation_attempts}/{cfg.max_validation_retries})")
-                        run.last_feedback = (
-                            "The test build FAILED. Fix the production code so tests pass. "
-                            "Do not edit tests. Failure output:\n" + vr.output_tail
-                        )
+                        run.last_feedback = fix_instruction + vr.output_tail
                         # reset iteration budget for the loopback phase so it can act
                         run.iterations[loopback] = 0
                         run.approvals[loopback] = "rejected"  # forces re-run semantics

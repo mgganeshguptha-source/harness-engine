@@ -188,6 +188,11 @@ class HarnessConfig:
     # When validation fails, loop back to this phase to fix the code, carrying the
     # failure as feedback. Empty string => don't loop, just halt.
     validation_loopback_phase: str = "coding"
+    # Where to loop back when the red build is the TEST code's own fault (it will
+    # not COMPILE) rather than a production defect. 'coding' cannot fix this — it
+    # may only write src/main — so sending test-compilation failures there burns
+    # the retry budget and tempts the model to mutate production code instead.
+    test_failure_loopback_phase: str = "unit_testing"
     # Max code<->test cycles before giving up and halting for a human.
     # Guards against infinite loops burning credits.
     max_validation_retries: int = 3
@@ -323,6 +328,7 @@ class HarnessConfig:
             cache_write_rates=data.get("cache_write_rates") or cls().cache_write_rates,
             pre_validation_command=data.get("pre_validation_command", cls.pre_validation_command),
             validation_loopback_phase=data.get("validation_loopback_phase", cls.validation_loopback_phase),
+            test_failure_loopback_phase=data.get("test_failure_loopback_phase", cls.test_failure_loopback_phase),
             max_validation_retries=int(data.get("max_validation_retries", cls.max_validation_retries)),
             min_coverage=float(data.get("min_coverage", cls.min_coverage)),
             coverage_scope=data.get("coverage_scope", cls.coverage_scope),
