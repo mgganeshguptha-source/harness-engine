@@ -36,6 +36,57 @@ _ISSUE = re.compile(r"^\s*(?:[-*>\s]*)?\[ISSUE\]\s*:\s*(\S.*)$", re.IGNORECASE |
 
 _PASS_TOKENS = {"pass", "approve", "approved"}
 
+# ---- SEVERITY GATE -------------------------------------------------------
+# Only these classes of finding may BLOCK a change. Anything else the reviewer
+# raises is advisory and must not loop the pipeline back to coding.
+#
+# Why (run 31252416919): the reviewer's sole remaining objection was that
+# fetchBookByAuthor() used intermediate local variables instead of fluent
+# chaining "like fetchBook() does" — correct code, purely a consistency
+# preference. It burned both retries and HALTED the story at the cap, ~15
+# credits spent converging on cosmetics. A style opinion must never be able to
+# stop a run; it belongs in the review notes for a human to weigh.
+#
+# The prompt asks the reviewer to tag each [ISSUE] with its class. This is the
+# deterministic half: markdown asks, code enforces. An issue whose class is not
+# in this set is downgraded to advisory and reported, not acted on.
+_BLOCKING_CLASSES = {
+    "CORRECTNESS",      # wrong behaviour, broken logic, bad edge-case handling
+    "CONTRACT",         # wrong signature/endpoint/status/response shape
+    "REACTIVE",         # blocking calls in a reactive chain, signal loss
+    "CONCURRENCY",      # thread-safety, resource leaks
+    "SECURITY",         # injection, secret exposure, missing authz
+    "ERROR_HANDLING",   # errors swallowed or surfaced wrongly
+}
+# Tolerate the spellings a model naturally produces for the same class.
+_CLASS_ALIASES = {
+    "ERROR HANDLING": "ERROR_HANDLING",
+    "ERRORHANDLING": "ERROR_HANDLING",
+    "REACTIVE SAFETY": "REACTIVE",
+    "REACTIVE/CONCURRENCY": "REACTIVE",
+    "CONCURRENCY SAFETY": "CONCURRENCY",
+    "THREAD SAFETY": "CONCURRENCY",
+    "API CONTRACT": "CONTRACT",
+}
+_CLASS_PREFIX = re.compile(r"^\(\s*([A-Za-z_/ ]+?)\s*\)\s*(.*)$", re.DOTALL)
+
+
+def _classify(issue_text: str):
+    """Split '(CLASS) description' into (normalized_class|None, description).
+
+    An issue with no parenthesised class, or an unrecognised one, returns None —
+    the caller decides what to do with it.
+    """
+    m = _CLASS_PREFIX.match(issue_text.strip())
+    if not m:
+        return None, issue_text.strip()
+    raw = m.group(1).strip().upper().replace("-", "_")
+    cls = _CLASS_ALIASES.get(raw.replace("_", " "), raw)
+    cls = _CLASS_ALIASES.get(raw, cls)
+    if cls in _BLOCKING_CLASSES:
+        return cls, m.group(2).strip()
+    return None, issue_text.strip()
+
 
 @dataclass
 class ReviewResult:
@@ -45,6 +96,12 @@ class ReviewResult:
     scanned_file: str = ""
     parse_ok: bool = True        # False when no VERDICT marker was found
     stale: bool = False          # True when the file predates this review attempt
+    # Findings the reviewer raised that are NOT in a blocking class (style,
+    # naming, consistency, preference). Reported to the human, never looped on.
+    advisory: list = field(default_factory=list)
+    # True when the reviewer said CHANGES_REQUESTED but named no blocking-class
+    # issue, so the gate downgraded the verdict to PASS.
+    downgraded: bool = False
 
 
 def parse_review(review_file: Path, written_after: float | None = None) -> ReviewResult:
@@ -100,10 +157,45 @@ def parse_review(review_file: Path, written_after: float | None = None) -> Revie
     verdict = "PASS" if passed else "CHANGES_REQUESTED"
 
     issues = [i.strip() for i in _ISSUE.findall(text) if i.strip()]
+
+    # ---- SEVERITY FILTER ----
+    # Keep only findings the reviewer tagged with a blocking class. Untagged or
+    # non-blocking findings are retained as advisory so the human still sees them,
+    # but they do not loop the pipeline.
+    #
+    # Untagged issues are treated as ADVISORY, not blocking. That is deliberate:
+    # the reviewer is explicitly instructed to tag anything it wants to block on,
+    # so an untagged finding means either (a) it is a style note the model wrote
+    # in the wrong bucket, or (b) the model ignored the format. Blocking on
+    # untagged text is what produced the cosmetic halt this filter exists to
+    # prevent. A real defect that is merely mistagged still surfaces in the
+    # advisory list and in review.md for a human to catch.
+    blocking, advisory = [], []
+    if not passed:
+        for raw in issues:
+            cls, desc = _classify(raw)
+            if cls:
+                blocking.append(f"({cls}) {desc}")
+            else:
+                advisory.append(desc)
+
+        if not blocking:
+            # Reviewer asked for changes but named nothing that may block. The
+            # code is correct by the reviewer's own account — advance, and carry
+            # the notes forward for the human.
+            return ReviewResult(
+                passed=True, verdict="PASS",
+                issues=[],
+                advisory=advisory,
+                downgraded=True,
+                scanned_file=str(review_file), parse_ok=True)
+        issues = blocking
+
     # If the reviewer said CHANGES_REQUESTED but listed no [ISSUE] lines, keep a
     # generic placeholder so the coding phase still gets actionable feedback.
     if not passed and not issues:
         issues = ["Reviewer requested changes but did not enumerate [ISSUE] items; "
                   "see review.md for prose notes."]
     return ReviewResult(passed=passed, verdict=verdict, issues=issues,
+                        advisory=advisory,
                         scanned_file=str(review_file), parse_ok=True)

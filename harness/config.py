@@ -252,6 +252,20 @@ class HarnessConfig:
         "documentation": [],
         "raise_pr":     [],
     })
+    # Stack tags for skills, so phase_skills can be filtered by repo_stacks the
+    # same way instruction subfolders already are. A skill listed here loads ONLY
+    # if one of its stacks is in repo_stacks; a skill NOT listed here is
+    # stack-neutral and always loads.
+    #
+    # Why (run 31252416919): repo_stacks=["backend"] correctly excluded Angular
+    # INSTRUCTIONS, but phase_skills was applied verbatim, so review-angular-code
+    # — a skill about Angular naming conventions, RxJS and NgRx — was loaded to
+    # review a Java WebFlux service. An Angular code-quality rubric pointed at
+    # reactive Java is a standing invitation to nitpick style, which is what the
+    # reviewer then did.
+    skill_stacks: dict = field(default_factory=lambda: {
+        "review-angular-code": ["angular-frontend", "ionic", "frontend"],
+    })
     # --- code review gate ---
     # Reviewer model. Should DIFFER from the coding model (independent reviewer).
     # If empty, model_for_phase falls back to phase_models/default like any phase.
@@ -323,6 +337,7 @@ class HarnessConfig:
             repo_stacks=data.get("repo_stacks") if data.get("repo_stacks") is not None else cls().repo_stacks,
             phase_file_scope=data.get("phase_file_scope") or cls().phase_file_scope,
             phase_skills=data.get("phase_skills") or cls().phase_skills,
+            skill_stacks=data.get("skill_stacks") or cls().skill_stacks,
             review_model=data.get("review_model", cls.review_model),
             review_loopback_phase=data.get("review_loopback_phase", cls.review_loopback_phase),
             max_review_retries=int(data.get("max_review_retries", cls.max_review_retries)),
@@ -497,6 +512,26 @@ class HarnessConfig:
         pkg_parts = seg[idx:-1]
         class_name = seg[-1][:-len(".java")]
         return (".".join(pkg_parts), class_name)
+
+    def skills_for_phase(self, phase_id: str) -> list:
+        """Skills configured for a phase, filtered to this repo's stacks.
+
+        A skill tagged in skill_stacks loads only when one of its stacks appears
+        in repo_stacks. Untagged skills are stack-neutral and always load. An
+        empty repo_stacks, or ["*"], disables filtering (include everything) —
+        matching how instruction subfolders already behave.
+        """
+        wanted = list((self.phase_skills or {}).get(phase_id, []))
+        stacks = list(self.repo_stacks or [])
+        if not stacks or "*" in stacks:
+            return wanted
+        allowed = set(stacks)
+        out = []
+        for name in wanted:
+            tags = (self.skill_stacks or {}).get(name)
+            if not tags or allowed.intersection(tags):
+                out.append(name)
+        return out
 
     def model_for_phase(self, phase_id: str) -> str:
         """Model for a phase: phase_models[phase_id] if set, else the default.

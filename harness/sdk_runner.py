@@ -295,7 +295,9 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     skills_dir = gh / "skills"
     if skills_dir.is_dir():
         if cfg.selective_capability:
-            wanted = set(cfg.phase_skills.get(phase.id, []))
+            # Stack-filtered: an Angular review skill must not load on a
+            # backend repo (see config.skill_stacks).
+            wanted = set(cfg.skills_for_phase(phase.id))
         else:
             wanted = None  # all
         for skill_md in sorted(skills_dir.rglob("SKILL.md")):
@@ -604,7 +606,39 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"    or:                  VERDICT: CHANGES_REQUESTED   (only if the production code has a problem)\n"
         f"  - If CHANGES_REQUESTED, list each problem on its own line as:\n"
         f"      [ISSUE]: <specific, actionable description of the CODE problem and where>\n"
-        f"  - You may add free-form notes after the issues.\n"
+        f"  - Non-blocking observations go on their own lines as:\n"
+        f"      [NOTE]: <observation>\n"
+        f"    [NOTE] lines NEVER affect the verdict. They are recorded for the author "
+        f"and the run continues.\n"
+        f"SEVERITY — WHAT MAY AND MAY NOT BLOCK:\n"
+        f"  A verdict of CHANGES_REQUESTED is reserved for problems in one of these "
+        f"BLOCKING classes:\n"
+        f"    (a) CORRECTNESS — the code does not do what the story/plan requires, or "
+        f"is wrong for some input (null/empty/boundary), or the logic is broken;\n"
+        f"    (b) CONTRACT — wrong endpoint/signature/status code/response shape, or it "
+        f"violates the API interface it implements;\n"
+        f"    (c) REACTIVE/CONCURRENCY SAFETY — blocking calls in a reactive chain "
+        f"(.block(), .collectList()), signal loss, resource leaks, thread-safety bugs;\n"
+        f"    (d) SECURITY — injection, secret exposure, missing authz where required, "
+        f"unsafe deserialization;\n"
+        f"    (e) ERROR HANDLING — errors swallowed, or surfaced as the wrong status.\n"
+        f"  Everything else is a [NOTE] and MUST NOT trigger CHANGES_REQUESTED. In "
+        f"particular these are NON-BLOCKING, no matter how strongly you feel:\n"
+        f"    - style, formatting, naming, or import order;\n"
+        f"    - consistency or symmetry with how a sibling method is written "
+        f"(e.g. fluent chaining vs intermediate local variables) when both are correct;\n"
+        f"    - readability, verbosity, or a refactor you would personally prefer;\n"
+        f"    - comments, javadoc, or logging preferences;\n"
+        f"    - anything test- or coverage-related (already out of scope above).\n"
+        f"  The question is NOT 'would I have written it this way' but 'is this code "
+        f"WRONG'. If the code is correct and safe, the verdict is PASS even if you can "
+        f"see a tidier form. Blocking a change on cosmetics costs a full re-run of the "
+        f"pipeline and can halt the story entirely at the retry cap — the cost of a "
+        f"wrong CHANGES_REQUESTED is far higher than the cost of a [NOTE].\n"
+        f"  Each [ISSUE] line MUST begin with its blocking class in parentheses, e.g.\n"
+        f"      [ISSUE]: (CORRECTNESS) blank author is not rejected before the "
+        f"downstream call, so a blank path segment reaches the catalog service.\n"
+        f"  If you cannot name a blocking class for a finding, it is a [NOTE].\n"
         f"Be strict about production-code correctness, safety, and standards — but if the "
         f"only thing you could fault is test coverage, the verdict is PASS. "
         f"Write ONLY {rr}/.harness/review.md.\n"
@@ -1028,7 +1062,7 @@ class SdkAgentRunner:
                 try:
                     from config import HarnessConfig as _HC2
                     _cfg2 = _HC2.load(repo_root / ".harness")
-                    _configured = list((_cfg2.phase_skills or {}).get(phase.id, [])) if _cfg2 else []
+                    _configured = list(_cfg2.skills_for_phase(phase.id)) if _cfg2 else []
                 except Exception:
                     _configured = []
                 self.log(f"  [skills] phase '{phase.id}': "
