@@ -193,6 +193,17 @@ class HarnessConfig:
     # may only write src/main — so sending test-compilation failures there burns
     # the retry budget and tempts the model to mutate production code instead.
     test_failure_loopback_phase: str = "unit_testing"
+    # GLOBAL cap on how many times any ONE phase may execute in a single run,
+    # across every loop type combined.
+    #
+    # The review / coverage / validation budgets are independent counters that do
+    # not see each other, and every loopback resets iterations[phase] to 0. So a
+    # phase can re-enter far more often than any single cap suggests: observed in
+    # run 31257053514, unit_testing ran SIX times (2 coverage retries + 3
+    # validation retries + the original) while each individual counter stayed
+    # inside its limit. This is the backstop that makes "it will stop" true
+    # regardless of which combination of gates is firing.
+    max_phase_runs: int = 3
     # Max code<->test cycles before giving up and halting for a human.
     # Guards against infinite loops burning credits.
     max_validation_retries: int = 3
@@ -329,6 +340,7 @@ class HarnessConfig:
             pre_validation_command=data.get("pre_validation_command", cls.pre_validation_command),
             validation_loopback_phase=data.get("validation_loopback_phase", cls.validation_loopback_phase),
             test_failure_loopback_phase=data.get("test_failure_loopback_phase", cls.test_failure_loopback_phase),
+            max_phase_runs=int(data.get("max_phase_runs", cls.max_phase_runs)),
             max_validation_retries=int(data.get("max_validation_retries", cls.max_validation_retries)),
             min_coverage=float(data.get("min_coverage", cls.min_coverage)),
             coverage_scope=data.get("coverage_scope", cls.coverage_scope),

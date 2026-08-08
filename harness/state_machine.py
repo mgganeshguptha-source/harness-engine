@@ -123,6 +123,48 @@ class StateMachine:
         'done', 'halted', or 'awaiting_approval'.
         """
         phase = self._phase(run.current_phase)
+
+        # ---- GLOBAL PER-PHASE RUN CAP ----
+        # Counted here, at the single point every phase execution passes through,
+        # so it holds no matter which gate caused the re-entry. The review,
+        # coverage and validation budgets are separate counters that cannot see
+        # each other, and each loopback resets iterations[phase] to 0 — so without
+        # this a phase can run far more often than any one cap implies
+        # (run 31257053514: unit_testing ran 6x while every individual counter
+        # stayed within limits, burning ~15 minutes and the credit budget on a
+        # failure the agent could not diagnose).
+        #
+        # Stored under a namespaced key in the existing iterations dict because
+        # that dict already persists across saves; the "__runs__:" prefix cannot
+        # collide with a phase id and is never reset by the loopback handlers.
+        _cfg_cap = None
+        try:
+            from config import HarnessConfig as _HCcap
+            _cfg_cap = _HCcap.load(self.harness_dir).max_phase_runs
+        except Exception:
+            _cfg_cap = None
+        if _cfg_cap and _cfg_cap > 0:
+            _key = f"__runs__:{phase.id}"
+            _ran = int(run.iterations.get(_key, 0)) + 1
+            run.iterations[_key] = _ran
+            if _ran > _cfg_cap:
+                self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+                self.log(f"  ! PHASE_RUN_CAP — '{phase.id}' has already run "
+                         f"{_ran - 1} time(s) (cap {_cfg_cap}); halting instead of "
+                         f"looping again.")
+                self.log("    The gates kept sending work back to this phase and it "
+                         "did not converge. This needs a human: read the phase's last "
+                         "output and the validation failure, fix the underlying cause, "
+                         "then re-run.")
+                run.status = "halted"
+                run.halt_reason = (
+                    f"PHASE_RUN_CAP: phase '{phase.id}' exceeded max_phase_runs="
+                    f"{_cfg_cap} across all loopback types (review/coverage/validation "
+                    f"budgets are independent and combined to re-enter it repeatedly)."
+                )
+                run.save(self.harness_dir)
+                return run
+
         self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
 
         # Timestamp taken BEFORE the phase runs. The review gate uses it to prove

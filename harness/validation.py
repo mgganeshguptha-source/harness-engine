@@ -136,6 +136,40 @@ def _parse_coverage(csv_path: Path, metric: str) -> float | None:
         return None
 
 
+def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str:
+    """Extract the failing-test detail from surefire .txt reports.
+
+    Module-aware via rglob, so it works for single-module and aggregator repos
+    alike. Only reports that actually contain failures/errors are included, and
+    the whole thing is capped so a large suite cannot flood the feedback prompt.
+    """
+    try:
+        reports = sorted(repo_root.rglob("target/surefire-reports/*.txt"))
+    except Exception:
+        return ""
+    chunks: list[str] = []
+    for rp in reports:
+        try:
+            text = rp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        # Surefire writes a header line like:
+        #   Tests run: 5, Failures: 1, Errors: 0, Skipped: 0
+        # Skip clean reports.
+        if "Failures: 0, Errors: 0" in text:
+            continue
+        if "Tests run:" not in text:
+            continue
+        chunks.append(f"### {rp.name}\n{text.strip()}")
+    if not chunks:
+        return ""
+    joined = "\n\n".join(chunks)
+    if len(joined) > max_chars:
+        joined = joined[:max_chars] + "\n... [truncated by harness]"
+    log(f"  [harness] attached failing-test detail from {len(chunks)} surefire report(s)")
+    return joined
+
+
 def run_validation(repo_root: Path, harness_dir: Path, log=print,
                    changed_files: list | None = None) -> ValidationResult:
     cfg = HarnessConfig.load(harness_dir)
@@ -181,6 +215,18 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
 
     out = (proc.stdout or "") + "\n" + (proc.stderr or "")
     tail = "\n".join(out.splitlines()[-25:])  # last lines hold the BUILD result
+
+    # Maven's tail on a TEST failure says only "See .../surefire-reports for the
+    # individual test results" — the actual failing test, assertion and stack trace
+    # live in files on disk. Without them the loopback feedback carries no
+    # diagnosis, so the fixing phase is reduced to guessing: in run 31257053514 it
+    # burned every retry speculating (e.g. "switching to @Slf4j avoids missing
+    # Log4j classes at test runtime") because it never saw the actual error.
+    # Pull the failure detail out of the reports and attach it to the feedback.
+    if proc.returncode != 0 and "surefire-reports" in out:
+        detail = _surefire_failures(repo_root, log=log)
+        if detail:
+            tail = tail + "\n\n--- FAILING TEST DETAIL (from surefire-reports) ---\n" + detail
 
     passed = proc.returncode == 0
     failure_kind = None if passed else "test"
