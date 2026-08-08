@@ -334,6 +334,16 @@ class HarnessConfig:
                            else cls().write_exclude),
         )
 
+        # --- coverage threshold units normalization ---
+        # `min_coverage` is compared against a JaCoCo percentage (0-100), but it is
+        # natural to write it as a fraction (0.90) in YAML — and doing so silently
+        # DISABLES the gate: `85.0 < 0.90` is False, so anything above 0.9% passes.
+        # Accept both spellings and normalize to a percentage. A value in (0, 1] is
+        # read as a fraction; anything above 1 is already a percentage. (A literal
+        # 1% threshold is not a meaningful gate, so the ambiguity costs nothing.)
+        if 0 < cfg.min_coverage <= 1.0:
+            cfg.min_coverage = cfg.min_coverage * 100.0
+
         # --- multi-module resolution (backlog #10) ---
         # Precedence: explicit config value > auto-detect from pom.xml > none.
         if not cfg.target_module:

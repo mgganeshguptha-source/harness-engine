@@ -206,7 +206,21 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         except Exception as e:
             log(f"  [harness] coverage command error: {e} (continuing to parse if report exists)")
 
-        csv_path = repo_root / cfg.coverage_csv
+        # Locate the JaCoCo CSV module-aware. `coverage_csv` is configured
+        # MODULE-relative (target/site/jacoco/...), which equals the repo root only
+        # in a single-module repo. In an aggregator repo the report lives under
+        # <app-module>/, so joining it to repo_root finds nothing and the gate
+        # reports "unmeasurable" while the tests are actually green.
+        csv_path = cfg.resolved_coverage_csv(repo_root)
+        if csv_path is None:
+            # Nothing found anywhere — keep a concrete path for the message so the
+            # failure names what was looked for rather than a None.
+            csv_path = repo_root / cfg.coverage_csv
+        else:
+            try:
+                log(f"  [harness] coverage report: {csv_path.relative_to(repo_root)}")
+            except Exception:
+                log(f"  [harness] coverage report: {csv_path}")
         if cfg.coverage_scope == "changed":
             # PER-CHANGE coverage: only the classes the coding phase wrote this run.
             log(f"  [harness] coverage scope: changed classes = "
