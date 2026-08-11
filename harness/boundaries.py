@@ -66,6 +66,31 @@ def _to_repo_relative(path: str, repo_root: str | None) -> str:
     return p
 
 
+def _is_agent_scratch(path: str) -> bool:
+    """True iff `path` is inside the Copilot SDK's OWN per-session scratch area.
+
+    The SDK gives the agent a private working directory
+    (~/.copilot/session-state/<session-id>/files/...) where it keeps notes to
+    itself — working summaries, scratch reasoning, intermediate lists. These are
+    NOT repository content: they live outside repo_root, they are wiped when the
+    session ends, and nothing in them can reach the deliverable or the PR.
+
+    They were being judged against the phase's repo-relative write globs, which
+    they can never match, so an agent that paused to write itself a note was
+    killed with BOUNDARY_VIOLATION (observed run 31493208647: unit_testing wrote
+    test-coverage-summary.md to its session dir mid-coverage-loop and halted the
+    run). The behaviour is non-deterministic — it only fires when the model
+    happens to take notes — which makes it especially confusing to diagnose.
+
+    This exception is deliberately NARROW. It matches only the session-state
+    path, not the home directory generally: writes to ~/.ssh, ~/.gitconfig, the
+    engine checkout, or anywhere else outside the repo stay denied. Widening
+    "outside the repo" to "allowed" would remove the interlock's outer wall.
+    """
+    p = path.replace("\\", "/").lstrip("/")
+    return ".copilot/session-state/" in p
+
+
 def is_excluded(path: str, exclude_globs, repo_root: str | None = None) -> bool:
     """
     Return True iff `path` matches any exclude glob — an ALWAYS-DENY set that
@@ -88,11 +113,19 @@ def is_write_allowed(path: str, allowed_globs, repo_root: str | None = None,
 
     - Absolute paths under repo_root are relativized first (the SDK reports
       absolute paths; our globs are repo-relative).
+    - The agent's OWN session-state scratch dir is permitted — it is the model's
+      notepad, not repository content, and cannot reach the deliverable.
     - An escape attempt ('..' above root) is ALWAYS denied.
+    - Any OTHER absolute path outside repo_root is ALWAYS denied.
     - A path matching `exclude_globs` is ALWAYS denied — DENY WINS OVER ALLOW.
       This protects generated code that lives inside a writable module.
     - Empty allowed_globs => read-only phase => everything denied.
     """
+    # Checked BEFORE relativization: this path is outside repo_root by definition,
+    # so _to_repo_relative would leave it absolute and the out-of-bounds rule below
+    # would reject it.
+    if _is_agent_scratch(path):
+        return True
     rel = _to_repo_relative(path, repo_root)
     norm = _normalize(rel)
     if norm.startswith(".."):
