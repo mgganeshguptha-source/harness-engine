@@ -16,6 +16,22 @@
 #
 # FLAT IMPORTS: engine modules import each other flatly (no __init__.py), so run.py
 # is executed from INSIDE engine/harness (working-directory); --repo is ../../service.
+#
+# -----------------------------------------------------------------------------
+# WHY engine_repo / toolkit_repo ARE INPUTS AND NOT ${{ github.repository_owner }}
+# -----------------------------------------------------------------------------
+# These two checkouts previously used ${{ github.repository_owner }}, which is the
+# owner of the CALLING repo — not the owner of the engine. That silently worked for
+# the harness author (same account) and broke for every other user: a joiner who
+# forked sample-book-service got `repository: <their-name>/harness-engine`, which
+# does not exist. actions/checkout logged "Repository not found" but did NOT fail
+# the step, so the run limped on and died later with a misleading
+# "No such file or directory: engine/harness".
+#
+# The engine and toolkit live at a FIXED, canonical location regardless of who runs
+# the harness. They are inputs (not literals) so a fork of the whole toolchain — or
+# the eventual move into the BCBSM org — is a one-line change in the caller, with
+# no edit to this file.
 # =============================================================================
 name: Harness (engine)
 
@@ -48,9 +64,19 @@ on:
         required: false
         default: "main"
         type: string
+      engine_repo:
+        description: "owner/repo holding the harness engine. Canonical location — NOT the caller's account."
+        required: false
+        default: "mgganeshguptha-source/harness-engine"
+        type: string
+      toolkit_repo:
+        description: "owner/repo holding the shared skills + instructions."
+        required: false
+        default: "mgganeshguptha-source/copilot-toolkit"
+        type: string
     secrets:
       COPILOT_GITHUB_TOKEN:
-        description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW)"
+        description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW, Copilot Requests: Read)"
         required: true
 
 jobs:
@@ -68,21 +94,71 @@ jobs:
           fetch-depth: 0
 
       # --- 2. THIS engine repo -> ./engine ---
+      # No token: harness-engine is public, and a public repo is readable by the
+      # runner's default credentials. If it is ever made private, every caller will
+      # need a token that can read it — see the note in step 2b.
       - name: Checkout harness-engine
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/harness-engine
+          repository: ${{ inputs.engine_repo }}
           ref: ${{ inputs.engine_ref }}
           path: engine
 
+      # --- 2b. FAIL LOUDLY if the engine did not actually arrive ---
+      # actions/checkout can report "Repository not found" without failing the step,
+      # leaving an empty directory. Without this guard the job continues and dies
+      # several steps later with an unrelated-looking path error, which is what sent
+      # the first external user debugging in the wrong place entirely.
+      - name: Verify engine checkout
+        run: |
+          if [ ! -d engine/harness ] || [ ! -f engine/harness/run.py ]; then
+            echo "::error title=Engine checkout failed::Could not read ${{ inputs.engine_repo }}@${{ inputs.engine_ref }}."
+            echo ""
+            echo "Checked for engine/harness/run.py — not found."
+            echo "Likely causes:"
+            echo "  * the repo/ref does not exist (check the tag '${{ inputs.engine_ref }}' is pushed)"
+            echo "  * the repo is private and this run has no credentials that can read it"
+            echo ""
+            echo "Contents of ./engine:"
+            ls -la engine 2>/dev/null || echo "  (directory missing)"
+            exit 1
+          fi
+          echo "Engine OK: ${{ inputs.engine_repo }}@${{ inputs.engine_ref }}"
+
       # --- 3. the central toolkit -> ./toolkit (skills + instructions) ---
+      # NOTE ON ACCESS: while copilot-toolkit is PRIVATE, the caller's token must be
+      # able to read it. A fine-grained PAT can only be scoped to repositories owned
+      # by the token's own resource owner, so a joiner's personal PAT CANNOT read a
+      # private repo under a different account — even if they are a collaborator.
+      # Workable options: make copilot-toolkit public, or host both repos in an org
+      # where members' tokens can be granted access (the BCBSM case).
       - name: Checkout copilot-toolkit
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/copilot-toolkit
+          repository: ${{ inputs.toolkit_repo }}
           ref: ${{ inputs.toolkit_ref }}
           path: toolkit
-          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}   # needed: toolkit is a separate private repo
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+
+      # --- 3a. FAIL LOUDLY if the toolkit did not arrive ---
+      # Without skills/instructions the agent still runs, but produces code that
+      # ignores every house convention — a silent quality failure that is much worse
+      # than a loud stop, because the run goes green and the output is wrong.
+      - name: Verify toolkit checkout
+        run: |
+          if [ ! -d toolkit/skills ] && [ ! -d toolkit/instructions ]; then
+            echo "::error title=Toolkit checkout failed::Could not read ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}."
+            echo ""
+            echo "Neither toolkit/skills nor toolkit/instructions is present."
+            echo "If copilot-toolkit is private, your fine-grained PAT cannot read it"
+            echo "unless the repo is owned by your own account or an org that has"
+            echo "granted your token access."
+            echo ""
+            echo "Contents of ./toolkit:"
+            ls -la toolkit 2>/dev/null || echo "  (directory missing)"
+            exit 1
+          fi
+          echo "Toolkit OK: ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}"
 
       # --- 3b. place toolkit skills/instructions into the service checkout ---
       # The engine loads capability from <service>/.github/skills and
@@ -97,7 +173,7 @@ jobs:
           if [ -d toolkit/instructions ]; then
             cp -r toolkit/instructions service/.github/
           fi
-          echo "Loaded skills/instructions from copilot-toolkit@${{ inputs.toolkit_ref }}"
+          echo "Loaded skills/instructions from ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}"
 
       # --- 4. toolchains ---
       - name: Set up JDK
@@ -160,8 +236,11 @@ jobs:
       # --- 8. push the audit trail to a branch — ALWAYS (success OR halt) ---
       # This is what makes the run inspectable: context.md, capability-manifest,
       # run-summary land on harness-audit/<feature>-<run_id> every time.
+      #
+      # Guarded on the engine having actually run: when an early checkout fails there
+      # is nothing to audit, and pushing an empty branch just adds noise to the repo.
       - name: Commit audit trail to a branch (always)
-        if: always()
+        if: always() && hashFiles('engine/harness/run.py') != ''
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
