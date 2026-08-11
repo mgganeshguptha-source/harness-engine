@@ -141,6 +141,22 @@ def _report_actual_credits(before, after):
         return
 
     delta = after - before
+    # A run that consumed nothing is not a real outcome — every phase calls a model.
+    # Two readings of exactly 0.00 therefore mean the billing endpoint answered but
+    # reported no usage for this account, not that the run was free. That happens
+    # when the Copilot licence is billed through an org/enterprise (user-level usage
+    # is not reported), or the plan does not itemise AI credits. Printing "0.00
+    # credits" as though it were a cost figure would be actively misleading, so say
+    # what it actually means.
+    if before == 0 and after == 0:
+        print("  Unable to fetch the ai credits usage due to api failure, "
+              "refer to github.com for actual credit used")
+        print("  (The billing API responded but reported no usage for this account.")
+        print("   Expected when the Copilot licence is billed through an organization")
+        print("   or enterprise — user-level credit reporting is unavailable there.")
+        print("   The run itself was unaffected.)")
+        return
+
     print(f"  ACTUAL AI CREDITS USED THIS RUN: {delta:.2f} "
           f"(≈ ${delta * 0.01:.4f})   [1 credit = $0.01]")
     print(f"  billing counter {before:.2f} -> {after:.2f}")

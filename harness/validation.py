@@ -190,8 +190,31 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             if fmt.returncode == 0:
                 log("  [harness] formatting applied (or already clean)")
             else:
-                # Non-fatal: log and continue; validation will catch real problems.
-                log(f"  [harness] formatting step returned exit {fmt.returncode} (continuing)")
+                # Distinguish "this repo has no formatter configured" from "the
+                # formatter ran and failed". The first is benign and extremely
+                # common — the sample repo has no spring-javaformat plugin, so
+                # every run logged "formatting step returned exit 1", which reads
+                # like a failure to anyone new and sent joiners hunting a
+                # non-problem. The second is worth seeing.
+                _out = (fmt.stdout or "") + (fmt.stderr or "")
+                _missing = (
+                    "No plugin found for prefix" in _out
+                    or "Could not find goal" in _out
+                    or "does not exist or no valid version" in _out
+                    or "Unknown lifecycle phase" in _out
+                )
+                if _missing:
+                    log("  [harness] formatting skipped — no formatter plugin "
+                        "configured in this repo (this is fine)")
+                    log('             set pre_validation_command: "" in '
+                        '.harness/config.yaml to silence this')
+                else:
+                    # Non-fatal: log and continue; validation will catch real problems.
+                    log(f"  [harness] formatting step returned exit {fmt.returncode} "
+                        f"(continuing)")
+                    _tail = "\n".join(_out.strip().splitlines()[-5:])
+                    if _tail:
+                        log(f"             {_tail}")
         except Exception as e:
             log(f"  [harness] formatting step error: {type(e).__name__}: {e} (continuing)")
 

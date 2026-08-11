@@ -151,14 +151,12 @@ class PhaseExecutor:
                 "skills_loaded": list(getattr(result, "skills_loaded", []) or []),
                 "tools_invoked": list(getattr(result, "tools_invoked", []) or []),
             })
-            if est.get("credits") is not None:
-                cost_str = f"~{est['credits']:.1f} credits (~${est['usd']:.4f})"
-                if est.get("partial"):
-                    cost_str += " [partial: cache-write not reported]"
-            else:
-                cost_str = f"rate unknown for model '{_model}'"
+            # Tokens only — no per-phase cost. The authoritative figure is the
+            # GitHub billing-API credit delta printed once at the end of the run.
+            # A token-priced per-phase guess printed alongside it just invites the
+            # wrong number to be quoted, and the two disagree by up to 16%.
             self.log(f"  [tokens] {phase.id}: {phase_io} tokens "
-                     f"(running total: {cumulative}) | est cost: {cost_str}")
+                     f"(running total: {cumulative})")
         else:
             # No token usage reported, but the phase may still have loaded/invoked
             # skills. Record attribution so the audit trail isn't blank.
