@@ -237,23 +237,69 @@ class StateMachine:
             if phase.id not in run.completed_phases:
                 run.completed_phases.append(phase.id)
 
-            # ---- CLARIFICATION GATE ----
-            # After the context phase, scan for [NEEDS CLARIFICATION] markers.
-            # Any remaining => the story is ambiguous => halt for human input,
-            # do NOT proceed to prompt_steps.
+            # ---- CONTEXT GATE (clarifications + feasibility) ----
+            # One scan, two markers, one halt path:
+            #   [NEEDS CLARIFICATION] -> the STORY is ambiguous; the BA answers it
+            #   [BLOCKER]: (CLASS)    -> THIS REPO cannot build it as written;
+            #                            re-scope, sequence, or move it
+            # The remedies differ, so the log distinguishes them even though the
+            # mechanism is shared. Neither may be silently guessed into code.
             if getattr(phase, "scan_clarifications", False):
-                from clarification import scan_clarifications as _scan
+                from clarification import scan_context as _scan
                 from config import HarnessConfig as _HC
                 _cfg = _HC.load(self.harness_dir)
-                cr = _scan(self.repo_root, _cfg.context_output_dir)
-                if not cr.clear:
-                    self.log(f"  ! NEEDS_CLARIFICATION — {len(cr.items)} item(s) unresolved in {cr.scanned_file}")
+                _bmode = (getattr(_cfg, "blocker_gate", "blocking") or "blocking").strip().lower()
+
+                cr = _scan(self.repo_root, _cfg.context_output_dir,
+                           check_feasibility=(_bmode != "off"))
+
+                # Report the feasibility posture BEFORE any halt, so the operator
+                # can always tell whether the check ran. A gate that is quietly
+                # switched off is worse than no gate: the log still looks assured.
+                if _bmode == "off":
+                    self.log("  [harness] feasibility check: OFF (blocker_gate: off) "
+                             "— story feasibility was not assessed")
+                elif _bmode != "blocking":
+                    self.log("  [harness] feasibility check is ADVISORY — blockers "
+                             "will be reported but will NOT halt this run")
+                if cr.verdict == "MISSING" and _bmode != "off":
+                    self.log("  [harness] feasibility: no VERDICT line in the context "
+                             "file — the assessment may not have run")
+                if cr.downgraded:
+                    self.log("  [harness] feasibility: NO_GO asserted without a "
+                             "recognised blocker class — downgraded to GO")
+                for a in cr.advisory:
+                    self.log("      (note) " + a)
+
+                # --- clarifications: always blocking ---
+                if cr.items:
+                    self.log(f"  ! NEEDS_CLARIFICATION — {len(cr.items)} item(s) "
+                             f"unresolved in {cr.scanned_file}")
                     for it in cr.items:
                         self.log("      • " + it)
                     run.status = "needs_input"
                     run.save(self.harness_dir)
                     return run
-                self.log("  [harness] clarification gate: clear (no open items)")
+
+                # --- blockers: blocking unless the gate is advisory/off ---
+                if cr.blockers:
+                    self.log(f"  ! NOT_FEASIBLE — {len(cr.blockers)} blocker(s) in "
+                             f"{cr.scanned_file}")
+                    for b in cr.blockers:
+                        self.log("      • " + b)
+                    if _bmode == "blocking":
+                        self.log("    The story cannot be built in this repository as "
+                                 "written. Re-scope it, sequence it behind the work "
+                                 "that adds the missing piece, or move it to the "
+                                 "service that owns the concern. To proceed anyway, "
+                                 "set blocker_gate: advisory in .harness/config.yaml.")
+                        run.status = "needs_input"
+                        run.save(self.harness_dir)
+                        return run
+
+                _v = cr.verdict if cr.verdict in ("GO", "NO_GO") else "not assessed"
+                self.log(f"  [harness] context gate: clarifications clear | "
+                         f"feasibility {_v}")
 
             # ---- CODE REVIEW GATE ----
             # After code_review, parse the independent reviewer's structured verdict.

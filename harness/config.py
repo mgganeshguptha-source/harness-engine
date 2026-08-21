@@ -204,6 +204,18 @@ class HarnessConfig:
     # inside its limit. This is the backstop that makes "it will stop" true
     # regardless of which combination of gates is firing.
     max_phase_runs: int = 3
+
+    # --- feasibility half of the context gate ---
+    # How to treat [BLOCKER] lines written by the context phase's feasibility pass.
+    #   blocking  -> a classified blocker halts the run (default)
+    #   advisory  -> blockers reported, run continues
+    #   off       -> feasibility is not assessed at all
+    # Only the FEASIBILITY half is affected. [NEEDS CLARIFICATION] always blocks —
+    # an ambiguous story can never be guessed into code, regardless of this setting.
+    # Non-blocking modes announce themselves on EVERY run: a gate that is quietly
+    # switched off is worse than no gate, because the log still looks assured —
+    # the same failure mode as a formatter that silently never ran.
+    blocker_gate: str = "blocking"
     # Max code<->test cycles before giving up and halting for a human.
     # Guards against infinite loops burning credits.
     max_validation_retries: int = 3
@@ -341,6 +353,7 @@ class HarnessConfig:
             validation_loopback_phase=data.get("validation_loopback_phase", cls.validation_loopback_phase),
             test_failure_loopback_phase=data.get("test_failure_loopback_phase", cls.test_failure_loopback_phase),
             max_phase_runs=int(data.get("max_phase_runs", cls.max_phase_runs)),
+            blocker_gate=str(data.get("blocker_gate", cls.blocker_gate)).strip().lower(),
             max_validation_retries=int(data.get("max_validation_retries", cls.max_validation_retries)),
             min_coverage=float(data.get("min_coverage", cls.min_coverage)),
             coverage_scope=data.get("coverage_scope", cls.coverage_scope),

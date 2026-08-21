@@ -55,6 +55,9 @@ class Phase:
     clear_before_run: tuple = field(default_factory=tuple)
     # If True, after this phase the harness scans the context output for
     # [NEEDS CLARIFICATION] markers and halts (needs_input) if any remain.
+    # Run the CONTEXT GATE after this phase: scans the written context file for
+    # BOTH [NEEDS CLARIFICATION] (story ambiguous) and [BLOCKER] (this repo cannot
+    # build it). One scan, one halt path — see clarification.scan_context.
     scan_clarifications: bool = False
     # If True, after this phase the harness appends an EXECUTION RECORD to the
     # plan audit file (actual files touched vs approved Impacted Files; flags
@@ -81,7 +84,7 @@ PHASES = (
         human_gate=True,                            # -> review context
         max_iterations=6,
         pre_create_dirs=(".github/story-context-files",),
-        scan_clarifications=True,                   # gate on [NEEDS CLARIFICATION]
+        scan_clarifications=True,                   # context gate: clarifications + feasibility
     ),
     Phase(
         id="prompt_steps",
