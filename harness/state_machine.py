@@ -27,6 +27,7 @@ from typing import Protocol
 from contracts import ExitCode, label
 from phases import PHASES, Phase, next_phase
 from state import RunState
+import halt_gates as HG
 
 
 class PhaseExecutor(Protocol):
@@ -157,6 +158,7 @@ class StateMachine:
                          "output and the validation failure, fix the underlying cause, "
                          "then re-run.")
                 run.status = "halted"
+                run.halt_gate = HG.PHASE_RUN_CAP
                 run.halt_reason = (
                     f"PHASE_RUN_CAP: phase '{phase.id}' exceeded max_phase_runs="
                     f"{_cfg_cap} across all loopback types (review/coverage/validation "
@@ -165,7 +167,53 @@ class StateMachine:
                 run.save(self.harness_dir)
                 return run
 
+        # ---- BY-EXCEPTION PHASES ----
+        # The design phase runs only when the story needs one. That judgement is
+        # made by the CONTEXT phase, which is the only phase that has read both
+        # the story and the codebase, and is recorded in context.md as
+        # "DESIGN REQUIRED: YES/NO".
+        #
+        # Most stories follow a pattern the codebase already establishes and have
+        # no open design question. Producing a design document for every one of
+        # them costs a model invocation per run and, worse, trains reviewers to
+        # skim past design documents — so the ones that matter stop being read.
+        #
+        # A MISSING marker skips too. That keeps behaviour identical to today for
+        # context files written before this phase existed, rather than silently
+        # adding a phase (and its cost) to every in-flight story. It is logged,
+        # so the absence is visible rather than assumed.
+        if phase.id == "design":
+            try:
+                from clarification import scan_context as _scan_d
+                from config import HarnessConfig as _HCd
+                _cfgd = _HCd.load(self.harness_dir)
+                _dr = _scan_d(self.repo_root, _cfgd.context_output_dir,
+                              check_feasibility=False).design_required
+            except Exception as _e:
+                self.log(f"  [design] could not read the design trigger ({_e!r}) — skipping")
+                _dr = "MISSING"
+            if _dr != "YES":
+                self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+                if _dr == "NO":
+                    self.log("  [design] not required — the context phase judged this "
+                             "story to follow an existing pattern. Skipping.")
+                else:
+                    self.log("  [design] no DESIGN REQUIRED marker in the context file "
+                             "— skipping (context may predate the design phase).")
+                if phase.id not in run.completed_phases:
+                    run.completed_phases.append(phase.id)
+                nxt = next_phase(phase.id)
+                if nxt is None:
+                    run.status = "done"
+                else:
+                    run.current_phase = nxt.id
+                    run.status = "running"
+                run.save(self.harness_dir)
+                return run
+
         self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+
+        _t_start = time.time()
 
         # Timestamp taken BEFORE the phase runs. The review gate uses it to prove
         # review.md was actually (re)written by THIS attempt — see the stale-verdict
@@ -175,6 +223,12 @@ class StateMachine:
 
         code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        # Accumulate, don't overwrite: a phase re-entered by a loopback should
+        # report the total time it consumed across the run, not just the last go.
+        _elapsed = round(time.time() - _t_start, 1)
+        run.phase_durations[phase.id] = round(
+            run.phase_durations.get(phase.id, 0.0) + _elapsed, 1)
 
         # ---- SCOPE GATE ----
         # The coding phase created production file(s) the approved plan never listed.
@@ -217,12 +271,14 @@ class StateMachine:
             self.log(halt_msg)
             run.last_feedback = halt_msg
             run.status = "halted"
+            run.halt_gate = HG.SCOPE
             run.save(self.harness_dir)
             return run
 
         # ---- apply the transition ----
         if code in _HALTING:
             run.status = "halted"
+            run.halt_gate = HG.from_exit_code(code)
             run.save(self.harness_dir)
             return run
 
@@ -278,6 +334,7 @@ class StateMachine:
                     for it in cr.items:
                         self.log("      • " + it)
                     run.status = "needs_input"
+                    run.halt_gate = HG.CLARIFICATION
                     run.save(self.harness_dir)
                     return run
 
@@ -294,12 +351,83 @@ class StateMachine:
                                  "service that owns the concern. To proceed anyway, "
                                  "set blocker_gate: advisory in .harness/config.yaml.")
                         run.status = "needs_input"
+                        run.halt_gate = HG.FEASIBILITY
                         run.save(self.harness_dir)
                         return run
 
                 _v = cr.verdict if cr.verdict in ("GO", "NO_GO") else "not assessed"
                 self.log(f"  [harness] context gate: clarifications clear | "
                          f"feasibility {_v}")
+
+            # ---- AC CONFORMANCE GATE ----
+            # Distinct from the review gate directly below. Review asks whether
+            # the code that EXISTS is correct; this asks whether every acceptance
+            # criterion HOLDS. A well-written change can pass review with a
+            # criterion silently unimplemented — nothing in the diff is wrong,
+            # because the problem is code that is absent.
+            #
+            # The gate checks COUNT as well as verdict: a validator that rules on
+            # six of seven criteria and reports PASS is indistinguishable in the
+            # log from one that checked all seven, so a criterion with no verdict
+            # is treated as unvalidated rather than satisfied. Same rule as the
+            # prompt-steps coverage matrix — a blank cell must never read as a pass.
+            if getattr(phase, "validation_gate", False):
+                from config import HarnessConfig as _HCv
+                _cfgv = _HCv.load(self.harness_dir)
+                _amode = (getattr(_cfgv, "ac_gate", "blocking") or "blocking").strip().lower()
+                if _amode == "off":
+                    self.log("  [harness] AC conformance gate: OFF (ac_gate: off) "
+                             "— criteria were not checked")
+                else:
+                    from ac_validation import scan_validation as _scan_ac
+                    vr = _scan_ac(self.repo_root, self.harness_dir,
+                                  _cfgv.context_output_dir)
+                    if _amode != "blocking":
+                        self.log("  [harness] AC conformance gate is ADVISORY — "
+                                 "unmet criteria will NOT halt this run")
+                    self.log(f"  [harness] AC conformance: {vr.verdict} "
+                             f"(met {len(vr.met)} · not met {len(vr.not_met)} · "
+                             f"unverifiable {len(vr.unverifiable)})")
+                    for ac in vr.not_met:
+                        self.log(f"      ! {ac} NOT MET")
+                    for ac in vr.unverifiable:
+                        self.log(f"      ? {ac} could not be verified")
+                    for ac in vr.unvalidated:
+                        self.log(f"      ? {ac} has no verdict — not validated")
+
+                    _blocking = bool(vr.not_met) or bool(vr.unvalidated) or (
+                        bool(vr.unverifiable) and getattr(_cfgv, "halt_on_inconclusive", True))
+
+                    if _blocking and _amode == "blocking":
+                        run.ac_attempts = getattr(run, "ac_attempts", 0) + 1
+                        _loop = _cfgv.ac_loopback_phase
+                        if _loop and run.ac_attempts <= _cfgv.max_ac_retries:
+                            self.log(f"  ! AC_NOT_MET — looping back to '{_loop}' "
+                                     f"(attempt {run.ac_attempts}/{_cfgv.max_ac_retries})")
+                            _detail = "\n".join(
+                                [f"- {a}: acceptance criterion NOT MET" for a in vr.not_met] +
+                                [f"- {a}: could not be verified" for a in vr.unverifiable] +
+                                [f"- {a}: no verdict was produced" for a in vr.unvalidated])
+                            run.last_feedback = (
+                                "AC CONFORMANCE FAILED. The code does not satisfy every "
+                                "acceptance criterion in context.md. Fix the production "
+                                "code so each criterion below holds as written — do NOT "
+                                "reword or narrow a criterion to fit the code.\n"
+                                + _detail + "\n\nFull detail: .harness/validation.md")
+                            run.iterations[_loop] = 0
+                            run.approvals[_loop] = "rejected"
+                            run.current_phase = _loop
+                            run.status = "running"
+                            run.save(self.harness_dir)
+                            return run
+                        self.log("    Retry budget exhausted. The delivered code does "
+                                 "not meet the acceptance criteria — a human needs to "
+                                 "decide whether the code or the criteria are wrong. "
+                                 "See .harness/validation.md.")
+                        run.status = "needs_input"
+                        run.halt_gate = HG.AC_CONFORMANCE
+                        run.save(self.harness_dir)
+                        return run
 
             # ---- CODE REVIEW GATE ----
             # After code_review, parse the independent reviewer's structured verdict.
@@ -340,6 +468,7 @@ class StateMachine:
                     self.log(halt_msg)
                     run.last_feedback = halt_msg
                     run.status = "halted"
+                    run.halt_gate = HG.CODE_REVIEW
                     run.save(self.harness_dir)
                     return run
 
@@ -393,6 +522,7 @@ class StateMachine:
                     self.log(halt_msg)
                     run.last_feedback = halt_msg
                     run.status = "halted"
+                    run.halt_gate = HG.CODE_REVIEW
                     run.save(self.harness_dir)
                     return run
 
@@ -480,6 +610,7 @@ class StateMachine:
                         self.log("  --- coverage/report tail ---\n" + vr.output_tail)
                         run.last_feedback = halt_msg
                         run.status = "halted"
+                        run.halt_gate = HG.COVERAGE
                         run.save(self.harness_dir)
                         return run
 
@@ -536,6 +667,7 @@ class StateMachine:
                              f"({run.validation_attempts-1}/{cfg.max_validation_retries}); halting")
                     self.log("  --- test output tail ---\n" + vr.output_tail)
                     run.status = "halted"
+                    run.halt_gate = HG.TEST_BUILD
                     run.save(self.harness_dir)
                     return run
 
@@ -557,6 +689,8 @@ class StateMachine:
 
         # unknown code — fail safe by halting
         run.status = "halted"
+        run.halt_gate = HG.OTHER
+        run.halt_detail = f"unmapped exit code {int(code)}"
         run.save(self.harness_dir)
         return run
 

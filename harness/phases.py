@@ -67,6 +67,10 @@ class Phase:
     # verdict (.harness/review.md). Issues => loop back to coding with the issues
     # as feedback (bounded by max_review_retries); clean => advance.
     review_gate: bool = False
+    # Run the AC-CONFORMANCE gate after this phase: reads .harness/validation.md
+    # and requires a verdict for every acceptance criterion. Distinct from
+    # review_gate, which judges the code rather than the criteria.
+    validation_gate: bool = False
 
 
 # ---- THE SPINE ----------------------------------------------------------
@@ -85,6 +89,18 @@ PHASES = (
         max_iterations=6,
         pre_create_dirs=(".github/story-context-files",),
         scan_clarifications=True,                   # context gate: clarifications + feasibility
+    ),
+    Phase(
+        id="design",
+        title="Technical design (by exception)",
+        kind=PhaseKind.MODEL,
+        allowed_writes=(".harness/**",),
+        required_artifact=".harness/design.md",
+        # Cleared before the phase runs so "the file exists" means "written this
+        # attempt" — the same guard the review gate needs, for the same reason.
+        clear_before_run=(".harness/design.md",),
+        human_gate=True,                            # -> review the decisions
+        max_iterations=6,
     ),
     Phase(
         id="prompt_steps",
@@ -134,6 +150,19 @@ PHASES = (
         human_gate=False,                           # validation gate follows instead
         max_iterations=10,
         validate_after=True,                        # harness runs mvn test here
+    ),
+    Phase(
+        id="validation",
+        title="AC conformance validation",
+        kind=PhaseKind.MODEL,
+        # READ-ONLY on source: validation observes, it never fixes. A validator
+        # that edits the thing it is judging has no standing.
+        allowed_writes=(".harness/**",),
+        required_artifact=".harness/validation.md",
+        clear_before_run=(".harness/validation.md",),
+        human_gate=False,                           # harness gate follows
+        max_iterations=8,
+        validation_gate=True,                       # parse per-AC verdicts
     ),
     Phase(
         id="documentation",

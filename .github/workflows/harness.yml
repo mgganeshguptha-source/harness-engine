@@ -74,6 +74,23 @@ on:
         required: false
         default: "mgganeshguptha-source/copilot-toolkit"
         type: string
+      resume:
+        description: >-
+          Continue a halted run from its working branch instead of starting over.
+          Checks out harness-wip/<feature_id>, keeps the phases that already
+          passed, and skips `init` so run-state.json survives. Use after fixing
+          code by hand. Leave false for a fresh run.
+        required: false
+        default: false
+        type: boolean
+      start_phase:
+        description: >-
+          When resuming, the phase to re-enter at (e.g. code_review, coding,
+          unit_testing). Blank resumes where the run halted, which is what you
+          want after fixing code and wanting the same gate re-evaluated.
+        required: false
+        default: ""
+        type: string
     secrets:
       COPILOT_GITHUB_TOKEN:
         description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW, Copilot Requests: Read)"
@@ -87,11 +104,31 @@ jobs:
       pull-requests: write
     steps:
       # --- 1. the CALLER's service repo -> ./service ---
+      # On resume, check out the WORKING BRANCH rather than the default branch.
+      # That branch carries the source the agent wrote, any fix a human pushed on
+      # top of it, and .harness/run-state.json — without it there is nothing to
+      # resume from and the run would silently start over.
       - name: Checkout target service repo
         uses: actions/checkout@v4
         with:
           path: service
           fetch-depth: 0
+          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || github.ref }}
+
+      - name: Verify resume state
+        if: inputs.resume
+        working-directory: service
+        run: |
+          if [ ! -f .harness/run-state.json ]; then
+            echo "::error title=Nothing to resume::harness-wip/${{ inputs.feature_id }} has no .harness/run-state.json."
+            echo ""
+            echo "Resume needs a previous run's state. Either this feature has never"
+            echo "run, or the working branch was deleted. Re-trigger with resume=false"
+            echo "to start a fresh run."
+            exit 1
+          fi
+          echo "Resuming from harness-wip/${{ inputs.feature_id }}:"
+          python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
 
       # --- 2. THIS engine repo -> ./engine ---
       # No token: harness-engine is public, and a public repo is readable by the
@@ -201,7 +238,10 @@ jobs:
         run: npm install -g @github/copilot
 
       # --- 6. run the harness (from inside engine/harness for flat imports) ---
-      - name: Initialize run
+      # `init` WIPES run-state.json, so it must not run when resuming — that was
+      # the whole reason a halted run could only ever start over.
+      - name: Initialize run (fresh runs only)
+        if: ${{ !inputs.resume }}
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -211,6 +251,20 @@ jobs:
             --repo ../../service \
             --feature "${{ inputs.feature_id }}"
 
+      # Rewind the loaded state to the phase we are re-entering, and reset the
+      # retry budgets that stopped the last run — otherwise the gate that halted
+      # it fires again before the agent ever sees the human's fix.
+      - name: Rewind state (resume only)
+        if: inputs.resume
+        working-directory: engine/harness
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          if [ -n "${{ inputs.start_phase }}" ]; then
+            python resume.py --repo ../../service --phase "${{ inputs.start_phase }}"
+          else
+            python resume.py --repo ../../service
+          fi
+
       - name: Autorun (all phases)
         working-directory: engine/harness
         env:
@@ -219,6 +273,11 @@ jobs:
           GIT_AUTHOR_EMAIL: "harness-bot@users.noreply.github.com"
           GIT_COMMITTER_NAME: "harness-bot"
           GIT_COMMITTER_EMAIL: "harness-bot@users.noreply.github.com"
+          # Read by metrics.py. GITHUB_ACTOR / RUN_ID / REPOSITORY are provided
+          # by Actions; these three are not.
+          HARNESS_ENGINE_REF: ${{ inputs.engine_ref }}
+          HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
+          HARNESS_RESUMED: ${{ inputs.resume }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
@@ -233,13 +292,100 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py collect-audit --repo ../../service || true
 
-      # --- 8. push the audit trail to a branch — ALWAYS (success OR halt) ---
-      # This is what makes the run inspectable: context.md, capability-manifest,
-      # run-summary land on harness-audit/<feature>-<run_id> every time.
+      # --- 8. push the WORKING BRANCH — ALWAYS (success OR halt) ---
+      # This is what makes a halted run resumable, and it is the piece that was
+      # missing: on a halt, step 9 never ran, so the agent's source changes were
+      # discarded with the runner. Only the audit trail survived — enough to read
+      # what happened, not enough to continue.
       #
-      # Guarded on the engine having actually run: when an early checkout fails there
-      # is nothing to audit, and pushing an empty branch just adds noise to the repo.
-      - name: Commit audit trail to a branch (always)
+      # harness-wip/<feature> is deliberately NOT run-scoped: resume has to find it
+      # by name, and a run_id suffix would make it unfindable. It is force-pushed
+      # because it is a working branch, not history — the immutable per-run record
+      # is the audit branch below.
+      #
+      # A human fixing code by hand works on THIS branch, pushes, and re-triggers
+      # with resume=true. Their commit and the harness's output then share one
+      # lineage instead of racing on separate branches.
+      - name: Push working branch (always)
+        if: always() && hashFiles('engine/harness/run.py') != ''
+        working-directory: service
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          WIP_BRANCH="harness-wip/${FEATURE}"
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          # -B with no start point keeps the working tree and just moves the ref,
+          # so nothing the agent wrote is lost.
+          git checkout -B "$WIP_BRANCH"
+          git add -A 2>/dev/null || true
+          STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit on $WIP_BRANCH."
+          else
+            git commit -m "Harness WIP [$FEATURE] at $STATUS (run ${{ github.run_id }})"
+          fi
+          git push -f origin "$WIP_BRANCH"
+          echo "::notice title=Working branch::$WIP_BRANCH — resume from here with resume=true"
+
+      # --- 8a. publish the metrics record to a long-lived branch — ALWAYS ---
+      # Metrics live on their OWN branch, not the working branch: the working
+      # branch is force-pushed on every resume, which would discard history, and
+      # metrics are the one artifact that must accumulate across runs.
+      #
+      # One file per run (metrics/<yyyy>/<mm>/<feature>-<run_id>.json) means two
+      # concurrent runs never touch the same path, so this merges cleanly without
+      # locking. The rebase loop below covers the narrow window where two runs
+      # push within seconds of each other.
+      #
+      # Never fails the job: a metrics push that broke a build would be worse than
+      # no metrics at all.
+      - name: Publish metrics record (always)
+        if: always() && hashFiles('engine/harness/run.py') != ''
+        working-directory: service
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set +e
+          if [ ! -d metrics ]; then
+            echo "No metrics record produced; nothing to publish."
+            exit 0
+          fi
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          TMP=$(mktemp -d)
+          cp -r metrics/* "$TMP"/ 2>/dev/null
+          git fetch origin harness-metrics 2>/dev/null
+          if git rev-parse --verify origin/harness-metrics >/dev/null 2>&1; then
+            git checkout -B harness-metrics origin/harness-metrics
+          else
+            # Orphan: metrics share no history with the code, and keeping them
+            # separate stops the branch carrying every source commit too.
+            git checkout --orphan harness-metrics
+            git rm -rf . >/dev/null 2>&1
+          fi
+          mkdir -p metrics
+          cp -r "$TMP"/* metrics/ 2>/dev/null
+          git add metrics
+          if git diff --cached --quiet; then
+            echo "No new metrics to publish."
+            exit 0
+          fi
+          git commit -m "Metrics: ${{ inputs.feature_id }} run ${{ github.run_id }}"
+          for i in 1 2 3; do
+            git push origin harness-metrics && break
+            echo "Push raced with another run; rebasing (attempt $i)."
+            git fetch origin harness-metrics && git rebase origin/harness-metrics || break
+          done
+          echo "::notice title=Metrics published::harness-metrics branch"
+
+      # --- 8b. snapshot the run to an immutable audit branch — ALWAYS ---
+      # Per-run, never force-pushed: the record of what this particular run did.
+      # Points at the same commit as the working branch, so it captures the code,
+      # the state and the artifacts together.
+      - name: Snapshot audit branch (always)
         if: always() && hashFiles('engine/harness/run.py') != ''
         working-directory: service
         env:
@@ -247,20 +393,14 @@ jobs:
         run: |
           FEATURE="${{ inputs.feature_id }}"
           AUDIT_BRANCH="harness-audit/${FEATURE}-${{ github.run_id }}"
-          git config user.name "harness-bot"
-          git config user.email "harness-bot@users.noreply.github.com"
-          git checkout -b "$AUDIT_BRANCH"
-          git add audit/ 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No audit files to commit (collect-audit produced nothing)."
-          else
-            STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
-            git commit -m "Harness audit [$FEATURE] status=$STATUS (run ${{ github.run_id }})"
-            git push origin "$AUDIT_BRANCH"
-            echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
-          fi
+          STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
+          git checkout -B "$AUDIT_BRANCH"
+          git push origin "$AUDIT_BRANCH"
+          echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
 
       # --- 9. raise the code PR — ONLY on success ---
+      # Branches from the working branch, which by now holds everything the run
+      # produced. Run-scoped so each successful run gets its own reviewable PR.
       - name: Open pull request with the change (success only)
         if: success()
         working-directory: service
@@ -271,14 +411,16 @@ jobs:
           BRANCH="harness/${FEATURE}-${{ github.run_id }}"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
-          # return to the checked-out commit first (audit step left us on the audit branch)
-          git checkout "${{ github.sha }}" 2>/dev/null || git checkout main
-          git checkout -b "$BRANCH"
-          git add -A 2>/dev/null || true
-          git commit -m "Harness: $FEATURE" || echo "nothing to commit"
+          git checkout -B "$BRANCH"
           git push origin "$BRANCH"
           if [ -f .harness/pr-body.md ]; then
             gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base main --head "$BRANCH" || echo "PR create skipped"
           else
             gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base main --head "$BRANCH" || echo "PR create skipped"
           fi
+
+      # --- 10. tell the human how to continue when the run halted ---
+      - name: Explain how to resume (halt only)
+        if: failure() && hashFiles('engine/harness/run.py') != ''
+        run: |
+          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run."

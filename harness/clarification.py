@@ -73,6 +73,21 @@ _VERDICT = re.compile(
 )
 _BLOCKER_LINE = re.compile(r"^[\s\-\*>\u2022_#]*\[BLOCKER\]\s*:\s*(\S.*)$",
                            re.IGNORECASE | re.MULTILINE)
+
+# ---------------------------------------------------------------- design trigger
+# The context phase decides whether the story needs a technical design, because
+# it is the only phase that has read both the story and the codebase. The design
+# phase then runs BY EXCEPTION rather than for every story: most stories follow a
+# pattern the codebase already establishes, and a design document produced for
+# every one of them trains everybody to stop reading them.
+#   **DESIGN REQUIRED: YES** — cross-service, contract change, new pattern, or an
+#                              open structural decision
+#   **DESIGN REQUIRED: NO**  — the approach is settled by existing convention
+_DESIGN = re.compile(
+    r"^[\s\-\*>\u2022_#]*(?:\*\*|__)?\s*DESIGN\s+REQUIRED\s*(?:\*\*|__)?\s*:\s*"
+    r"(?:\*\*|__)?\s*(YES|NO)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _CLASS_PREFIX = re.compile(r"^\(\s*([A-Za-z_/ \-]+?)\s*\)\s*(.*)$", re.DOTALL)
 
 # Only these four may block. Anything else is a note.
@@ -169,6 +184,11 @@ class ClarificationResult:
     blockers: list = field(default_factory=list)   # classified => blocking
     advisory: list = field(default_factory=list)   # unclassified blockers / notes
     downgraded: bool = False                       # NO_GO with no valid class
+    # --- design trigger ---
+    # Whether the story needs a technical design. Decided by the context phase,
+    # which is the only phase that has read both the story and the codebase.
+    # Never gates anything; the state machine reads it to skip the design phase.
+    design_required: str = "MISSING"               # YES | NO | MISSING
 
     @property
     def has_verdict(self) -> bool:
@@ -203,13 +223,18 @@ def scan_context(repo_root: Path,
 
     text = f.read_text(encoding="utf-8", errors="replace")
 
+    # ---- design trigger (never gates; the state machine reads it) ----
+    dm = _DESIGN.search(text)
+    design_required = dm.group(1).upper() if dm else "MISSING"
+
     # ---- clarifications ----
     items = []
     for line in text.splitlines():
         if _is_real_marker_line(line):
             items.append(line.strip().lstrip(_LEADING).strip())
 
-    res = ClarificationResult(clear=False, scanned_file=str(f), items=items)
+    res = ClarificationResult(clear=False, scanned_file=str(f), items=items,
+                              design_required=design_required)
 
     if not check_feasibility:
         res.verdict = "SKIPPED"
