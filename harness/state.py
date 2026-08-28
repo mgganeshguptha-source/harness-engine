@@ -49,6 +49,10 @@ class RunState:
     # Real credits consumed, from the GitHub billing-API delta. None when the
     # billing endpoint was unreadable (org-billed seats) — never guessed.
     credits_actual: Optional[float] = None
+    # Paths the write-boundary interlock refused during the LAST phase, so the
+    # halt message can name them instead of telling the developer to go and read
+    # the log. Reset at the start of every phase.
+    denied_writes: list = field(default_factory=list)
 
     # how many times the AC-conformance gate has failed and looped back
     # (independent of the review, validation and coverage budgets).

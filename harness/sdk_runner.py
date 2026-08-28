@@ -958,6 +958,11 @@ class SdkAgentRunner:
                     msg = deny_reason(path, phase.id, eff_allowed, repo_root=str(repo_root),
                                       exclude_globs=eff_exclude)
                     self.log("  ! " + msg)
+                    try:
+                        if path not in run.denied_writes:
+                            run.denied_writes.append(path)
+                    except Exception:
+                        pass
                     return PermissionDecisionReject(feedback=msg)
                 return PermissionDecisionApproveOnce()
             if kind == "shell":

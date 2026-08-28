@@ -58,6 +58,39 @@ _TEST_GOAL = re.compile(r"(maven-compiler-plugin[^\n]*?:testCompile"
 _MAIN_PATH = re.compile(r"[/\\]src[/\\]main[/\\]", re.IGNORECASE)
 
 
+def _scope_detail(repo_root, run) -> str:
+    """Name the unplanned files and the approved list.
+
+    The scope message explained WHY the halt matters but never said WHICH files
+    caused it, so a developer had to diff the plan against the working tree by
+    hand to find out. The two lists side by side make the gap obvious.
+    """
+    try:
+        from execution_record import _approved_paths_from_plan
+        pf = repo_root / ".harness" / "prompt-steps.md"
+        approved = sorted(_approved_paths_from_plan(pf.read_text(encoding="utf-8"))) \
+            if pf.is_file() else []
+    except Exception:
+        approved = []
+    written = sorted(getattr(run, "changed_main_files", None) or [])
+    unplanned = [w for w in written if not any(w.endswith(a) or a.endswith(w)
+                                               for a in approved)]
+    out = ""
+    if unplanned:
+        out += "  Files NOT in the plan:\n"
+        for u in unplanned[:10]:
+            out += f"    - {u}\n"
+        if len(unplanned) > 10:
+            out += f"    ... and {len(unplanned) - 10} more\n"
+    if approved:
+        out += "  The plan approved:\n"
+        for a in approved[:10]:
+            out += f"    - {a}\n"
+        if len(approved) > 10:
+            out += f"    ... and {len(approved) - 10} more\n"
+    return out
+
+
 def _failure_is_in_tests(output: str) -> bool:
     """True when a red build is the TEST code's fault rather than production code's.
 
@@ -213,6 +246,10 @@ class StateMachine:
 
         self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
 
+        # Denials are per-attempt: a phase that is re-entered should report what
+        # IT refused, not what a previous attempt did.
+        run.denied_writes = []
+
         _t_start = time.time()
 
         # Timestamp taken BEFORE the phase runs. The review gate uses it to prove
@@ -266,6 +303,7 @@ class StateMachine:
                 "  Recommendation   : a human should read the plan's Impacted Files block\n"
                 "                     against the real failure, then re-plan. The change\n"
                 "                     has NOT advanced.\n"
+                + _scope_detail(self.repo_root, run) +
                 "  ===================================================\n"
             )
             self.log(halt_msg)
@@ -279,6 +317,50 @@ class StateMachine:
         if code in _HALTING:
             run.status = "halted"
             run.halt_gate = HG.from_exit_code(code)
+
+            # A write-boundary halt previously produced no summary at all — just
+            # "HALTED by an interlock, inspect the log above". The individual
+            # denials ARE logged as they happen, but they sit among dozens of
+            # approved-read lines, so the developer had to reconstruct what went
+            # wrong. Say it plainly, once, at the point of failure.
+            if run.halt_gate == HG.WRITE_BOUNDARY:
+                _denied = getattr(run, "denied_writes", None) or []
+                msg = (
+                    "\n  ============= WRITE BOUNDARY: HALTED =============\n"
+                    f"  The '{phase.id}' phase tried to write outside the paths it is\n"
+                    "  allowed to touch. The write was refused; nothing was changed.\n"
+                )
+                if _denied:
+                    msg += "  Refused:\n"
+                    for d in _denied[:10]:
+                        msg += f"    - {d}\n"
+                    if len(_denied) > 10:
+                        msg += f"    ... and {len(_denied) - 10} more\n"
+                else:
+                    msg += ("  Search this log for '! ' lines in the phase above to see\n"
+                            "  which paths were refused.\n")
+                msg += (
+                    "  Why this matters : each phase owns one kind of output. Coding writes\n"
+                    "                     production source, unit testing writes tests, and\n"
+                    "                     generated code is nobody's to hand-edit. Letting a\n"
+                    "                     phase write outside that removes the guarantee the\n"
+                    "                     gate exists to give.\n"
+                    "  Common causes    : the story asks for something the phase does not own\n"
+                    "                     (tests during coding, an OpenAPI spec edit); the\n"
+                    "                     change needs a new dependency, which means editing\n"
+                    "                     pom.xml — outside src/main and therefore refused;\n"
+                    "                     or the plan put a file in a module the phase cannot\n"
+                    "                     write to.\n"
+                    "  Recommendation   : decide whether the refused write was legitimate. If\n"
+                    "                     it was, the story or the plan is asking the wrong\n"
+                    "                     phase to do it — fix the story's scope, or make the\n"
+                    "                     change by hand and resume. If it was not, the story\n"
+                    "                     should say so explicitly in Out of Scope.\n"
+                    "  ==================================================\n"
+                )
+                self.log(msg)
+                run.last_feedback = msg
+
             run.save(self.harness_dir)
             return run
 
@@ -693,6 +775,13 @@ class StateMachine:
                         # CONDITIONAL TRANSITION (known edge, not dynamic):
                         # red build -> back to the phase that owns the broken file,
                         # carrying the failure as feedback, and let it fix + re-validate.
+                        # Log the failure detail on EVERY loopback, not only on the
+                        # final one. Previously the tail went into last_feedback for
+                        # the agent but never to the operator, so a run that looped
+                        # three times showed three identical "BUILD FAILURE (exit 1)"
+                        # lines and nothing about WHY — the actual compile error was
+                        # invisible in the log that a human reads.
+                        self.log("  --- build/test failure tail ---\n" + vr.output_tail)
                         self.log(f"  ! VALIDATION_FAILED ({'test-side' if test_side else 'main-side'}) "
                                  f"— looping back to '{loopback}' "
                                  f"(attempt {run.validation_attempts}/{cfg.max_validation_retries})")
