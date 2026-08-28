@@ -353,8 +353,15 @@ jobs:
             echo "No metrics record produced; nothing to publish."
             exit 0
           fi
+          # (the two early exits below run BEFORE the orphan checkout, so they
+          #  need no return; the ones after it do — see RETURN_TO)
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
+          # Remember where we are. This step checks out an ORPHAN branch, and an
+          # orphan shares no history with main — so every later step (audit
+          # branch, PR branch) inherited that and `gh pr create` failed with
+          # "has no history in common with main". Return before finishing.
+          RETURN_TO=$(git rev-parse --abbrev-ref HEAD)
           TMP=$(mktemp -d)
           cp -r metrics/* "$TMP"/ 2>/dev/null
           git fetch origin harness-metrics 2>/dev/null
@@ -371,6 +378,7 @@ jobs:
           git add metrics
           if git diff --cached --quiet; then
             echo "No new metrics to publish."
+            git checkout "$RETURN_TO" 2>/dev/null || true
             exit 0
           fi
           git commit -m "Metrics: ${{ inputs.feature_id }} run ${{ github.run_id }}"
@@ -380,6 +388,7 @@ jobs:
             git fetch origin harness-metrics && git rebase origin/harness-metrics || break
           done
           echo "::notice title=Metrics published::harness-metrics branch"
+          git checkout "$RETURN_TO" 2>/dev/null || git checkout -B "$RETURN_TO"
 
       # --- 8b. snapshot the run to an immutable audit branch — ALWAYS ---
       # Per-run, never force-pushed: the record of what this particular run did.
@@ -392,8 +401,20 @@ jobs:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           FEATURE="${{ inputs.feature_id }}"
-          AUDIT_BRANCH="harness-audit/${FEATURE}-${{ github.run_id }}"
+          # Sortable and readable: date first so a lexical branch listing is also
+          # chronological, then the outcome so a glance tells you which runs
+          # succeeded, then the run id so a branch still maps back to its Actions
+          # run. Grouped under <feature>/ so GitHub's branch list nests them.
+          # No colons — git branch names forbid them.
           STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          case "$STATUS" in
+            done)        OUTCOME=ok ;;
+            halted)      OUTCOME=halted ;;
+            needs_input) OUTCOME=needs-input ;;
+            *)           OUTCOME=unknown ;;
+          esac
+          AUDIT_BRANCH="harness-audit/${FEATURE}/${STAMP}-${OUTCOME}-${{ github.run_id }}"
           git checkout -B "$AUDIT_BRANCH"
           git push origin "$AUDIT_BRANCH"
           echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
@@ -408,7 +429,10 @@ jobs:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           FEATURE="${{ inputs.feature_id }}"
-          BRANCH="harness/${FEATURE}-${{ github.run_id }}"
+          # Same scheme as the audit branch. No outcome segment — this branch only
+          # exists on success.
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          BRANCH="harness/${FEATURE}/${STAMP}-${{ github.run_id }}"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
           git checkout -B "$BRANCH"
