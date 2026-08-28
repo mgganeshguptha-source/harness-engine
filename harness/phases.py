@@ -100,7 +100,11 @@ PHASES = (
         # attempt" — the same guard the review gate needs, for the same reason.
         clear_before_run=(".harness/design.md",),
         human_gate=True,                            # -> review the decisions
-        max_iterations=6,
+        # Higher than the other authoring phases: design must read the existing
+        # code before it can describe it, and a brownfield design that skipped
+        # that reading would be a guess. 6 turns proved too few — the phase spent
+        # them all exploring and never reached the write.
+        max_iterations=12,
     ),
     Phase(
         id="prompt_steps",

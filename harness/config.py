@@ -292,7 +292,12 @@ class HarnessConfig:
     phase_skills: dict = field(default_factory=lambda: {
         "context":      ["build-context", "analyze-service"],
         "prompt_steps": ["build-prompt-steps"],
-        "design":       ["build-design", "analyze-service"],
+        # analyze-service is deliberately NOT loaded here. It recursively traces
+        # downstream API calls — far heavier than a design phase needs, and in run
+        # 33167xxxxx it drove 24 exploration tool calls and 228K tokens until the
+        # phase ran out of turns without ever writing design.md. build-design does
+        # its own bounded read of the code.
+        "design":       ["build-design"],
         "coding":       ["security-review"],
         "code_review":  ["security-review", "review-angular-code"],
         "unit_testing": [],

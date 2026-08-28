@@ -16,6 +16,8 @@ Phase 4 will add  --real  to swap in the Copilot SDK runner.
 from __future__ import annotations
 import argparse
 import sys
+import os
+import time
 from pathlib import Path
 
 from state import RunState
@@ -116,6 +118,16 @@ def cmd_autorun(args):
 
     credits_after = None
     if credits_before is not None:
+        # GitHub's billing counter lags the requests that produced it. Reading it
+        # the instant the last phase returns catches a figure that is still
+        # settling, so the delta UNDER-reports: measured on run 33167xxxxx, the
+        # harness reported 28.12 while the settled page figure moved by ~37.
+        # A short pause recovers most of that. It is not a guarantee — the delta
+        # is labelled a lower bound in the report for the same reason.
+        _LAG_WAIT = int(os.environ.get("HARNESS_CREDIT_SETTLE_SECONDS", "45"))
+        if _LAG_WAIT > 0:
+            print(f"  [credits] waiting {_LAG_WAIT}s for the billing counter to settle")
+            time.sleep(_LAG_WAIT)
         try:
             from ai_credits import read_credits_used
             credits_after = read_credits_used(log=print)
@@ -181,6 +193,8 @@ def _report_actual_credits(before, after):
     print(f"  ACTUAL AI CREDITS USED THIS RUN: {delta:.2f} "
           f"(≈ ${delta * 0.01:.4f})   [1 credit = $0.01]")
     print(f"  billing counter {before:.2f} -> {after:.2f}")
+    print("  Treat this as a LOWER BOUND: GitHub's counter settles after the run,")
+    print("  so a reading taken now can still be catching up.")
     if delta < 0:
         # Only happens across a billing-period reset mid-run.
         print("  ! negative delta — the billing period reset during this run;")
