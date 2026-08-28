@@ -549,6 +549,49 @@ class StateMachine:
                     # detailed, human-actionable message.
                     # ============================================================
                     if kind == "coverage":
+                        # ---- NOTHING CHANGED: not a coverage problem at all ----
+                        # If the coding phase produced no production changes there is
+                        # nothing for the coverage gate to measure, and looping back
+                        # to unit_testing "to add tests" cannot possibly succeed —
+                        # there is no changed class to cover. Observed in run
+                        # 33164146030: the story was already implemented in the repo,
+                        # the coding agent made zero write requests, and the harness
+                        # still looped twice and burned ~15 credits before halting
+                        # with a message about coverage thresholds that sent the
+                        # operator looking at JaCoCo rather than at the story.
+                        #
+                        # Halt immediately with the actual cause.
+                        _changed = getattr(run, "changed_main_files", None) or []
+                        if not _changed:
+                            self.log("\n  ============ NO PRODUCTION CHANGES ============\n")
+                            self.log("  The coding phase produced no changes under the "
+                                     "application module's main source.")
+                            self.log("  Coverage cannot be measured because there is no "
+                                     "changed class to measure — this is NOT a coverage "
+                                     "shortfall, and adding tests cannot resolve it.")
+                            self.log("")
+                            self.log("  Most likely: this story is ALREADY IMPLEMENTED in "
+                                     "the repository, so the coding phase found the work "
+                                     "done and wrote nothing.")
+                            self.log("  Check the log for the coding phase — if it made no "
+                                     "write requests, that is what happened.")
+                            self.log("")
+                            self.log("  Other possibilities: the plan scoped the change "
+                                     "outside src/main, or the story asks for something "
+                                     "the codebase already does.")
+                            self.log("  ==============================================\n")
+                            run.status = "halted"
+                            run.halt_gate = HG.OTHER
+                            run.halt_detail = ("no production changes were made — story may "
+                                               "already be implemented")
+                            run.last_feedback = (
+                                "The coding phase made no changes to production source. "
+                                "Coverage cannot be measured. Verify whether this story is "
+                                "already implemented in the repository."
+                            )
+                            run.save(self.harness_dir)
+                            return run
+
                         run.coverage_attempts += 1
                         cov_loop = cfg.coverage_loopback_phase
                         pct = getattr(vr, "coverage_pct", None)
