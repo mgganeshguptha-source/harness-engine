@@ -57,6 +57,12 @@ def cmd_init(args):
         print(f"Read story from {cfg.story_file}")
 
     run = RunState(feature_id=args.feature, story=story, current_phase=PHASES[0].id)
+    # Stamped once, at init, so duration measures the whole run rather than the
+    # last resumed segment. GitHub LOGIN only — never the email address.
+    import os
+    from datetime import datetime, timezone
+    run.started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run.actor = os.environ.get("GITHUB_ACTOR")
     run.save(hd)
     print(f"Initialized run for '{args.feature}' at {hd}")
     print(f"First phase: {run.current_phase}")
@@ -118,6 +124,21 @@ def cmd_autorun(args):
 
     _report(run)
     _report_actual_credits(credits_before, credits_after)
+
+    # Persist the actual credit delta onto the state so the metrics record can
+    # carry it — it is computed here and nowhere else.
+    if credits_before is not None and credits_after is not None:
+        _d = round(credits_after - credits_before, 2)
+        run.credits_actual = _d if not (credits_before == 0 and credits_after == 0) else None
+
+    # One metrics record per run, written last and failing silently by design:
+    # observability must never be the reason a build goes red.
+    try:
+        from config import HarnessConfig as _HCm
+        import metrics as _metrics
+        _metrics.emit(run, repo, _HCm.load(_harness_dir(repo)))
+    except Exception as _e:
+        print(f"  [metrics] not emitted ({type(_e).__name__})")
     # exit non-zero if the harness halted or needs human input (CI job fails visibly)
     if run.status in ("halted", "needs_input"):
         import sys as _sys

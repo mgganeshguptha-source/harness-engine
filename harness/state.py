@@ -33,6 +33,26 @@ class RunState:
     # repo-relative src/main files the coding phase actually wrote this run. Used
     # by the per-change coverage gate to scope coverage to ONLY the changed classes.
     changed_main_files: list = field(default_factory=list)
+    # --- observability ---
+    # WHICH gate stopped the run, from the closed vocabulary in halt_gates.py.
+    # Free text here would not aggregate, which is the whole point of recording it.
+    halt_gate: Optional[str] = None
+    # Free text for an `other` halt only — never a substitute for halt_gate.
+    halt_detail: Optional[str] = None
+    # Wall-clock seconds per phase, summed across every entry into that phase.
+    # Separates model latency from Maven build time, which token counts cannot.
+    phase_durations: dict = field(default_factory=dict)
+    started_at: Optional[str] = None       # ISO-8601 UTC, set by init
+    # GitHub login of whoever triggered the run. LOGIN, never email: logins are
+    # already public in the repo, emails are personal data under BCBSM's regime.
+    actor: Optional[str] = None
+    # Real credits consumed, from the GitHub billing-API delta. None when the
+    # billing endpoint was unreadable (org-billed seats) — never guessed.
+    credits_actual: Optional[float] = None
+
+    # how many times the AC-conformance gate has failed and looped back
+    # (independent of the review, validation and coverage budgets).
+    ac_attempts: int = 0
     # how many times the code-review gate has failed and looped back to coding
     # (independent budget from validation and coverage retries).
     review_attempts: int = 0

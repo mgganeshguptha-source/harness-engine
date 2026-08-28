@@ -216,6 +216,24 @@ class HarnessConfig:
     # switched off is worse than no gate, because the log still looks assured —
     # the same failure mode as a formatter that silently never ran.
     blocker_gate: str = "blocking"
+
+    # --- AC conformance gate ---
+    # How to treat the validation phase's per-criterion verdicts.
+    #   blocking  -> NOT_MET or an unvalidated criterion halts / loops back
+    #   advisory  -> reported, run continues
+    #   off       -> the gate does not scan
+    # Non-blocking modes announce themselves on every run.
+    ac_gate: str = "blocking"
+    # Where a NOT_MET criterion sends the work. 'coding' by default: an
+    # unimplemented criterion is a production-code gap, not a test gap.
+    ac_loopback_phase: str = "coding"
+    max_ac_retries: int = 2
+    # Whether an INCONCLUSIVE result (a criterion nobody could verify) halts.
+    # Defaults to True — an unverified criterion is unknown, not satisfied, and
+    # is the one most likely to be broken because nothing has exercised it.
+    # Set False during rollout, when most UNVERIFIABLE findings will be gaps in
+    # the test fixture rather than in the code.
+    halt_on_inconclusive: bool = True
     # Max code<->test cycles before giving up and halting for a human.
     # Guards against infinite loops burning credits.
     max_validation_retries: int = 3
@@ -274,9 +292,11 @@ class HarnessConfig:
     phase_skills: dict = field(default_factory=lambda: {
         "context":      ["build-context", "analyze-service"],
         "prompt_steps": ["build-prompt-steps"],
+        "design":       ["build-design", "analyze-service"],
         "coding":       ["security-review"],
         "code_review":  ["security-review", "review-angular-code"],
         "unit_testing": [],
+        "validation":   ["build-validation"],
         "documentation": [],
         "raise_pr":     [],
     })
@@ -354,6 +374,10 @@ class HarnessConfig:
             test_failure_loopback_phase=data.get("test_failure_loopback_phase", cls.test_failure_loopback_phase),
             max_phase_runs=int(data.get("max_phase_runs", cls.max_phase_runs)),
             blocker_gate=str(data.get("blocker_gate", cls.blocker_gate)).strip().lower(),
+            ac_gate=str(data.get("ac_gate", cls.ac_gate)).strip().lower(),
+            ac_loopback_phase=data.get("ac_loopback_phase", cls.ac_loopback_phase),
+            max_ac_retries=int(data.get("max_ac_retries", cls.max_ac_retries)),
+            halt_on_inconclusive=bool(data.get("halt_on_inconclusive", cls.halt_on_inconclusive)),
             max_validation_retries=int(data.get("max_validation_retries", cls.max_validation_retries)),
             min_coverage=float(data.get("min_coverage", cls.min_coverage)),
             coverage_scope=data.get("coverage_scope", cls.coverage_scope),
