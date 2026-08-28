@@ -581,6 +581,8 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     src_test = f"{rr}/{_mod}src/test"
     docs_dir = f"{rr}/docs"
     pr_body = f"{rr}/.harness/pr-body.md"
+    design_file = f"{rr}/.harness/design.md"
+    validation_file = f"{rr}/.harness/validation.md"
 
     # code_review prompt: PUSH MODE (dossier inlined, reads disabled) when the
     # harness could build the dossier; legacy PULL MODE (agent reads the repo)
@@ -749,6 +751,33 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"anything other than {plan_file}.\n"
             f"Write ONLY {plan_file}."
         ),
+        # The design phase only RUNS when the context phase judged one necessary
+        # (DESIGN REQUIRED: YES) — the state machine skips it otherwise. So this
+        # prompt assumes a design is wanted and does not re-litigate that.
+        "design": (
+            f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
+            f"and do NOT wait for input. Use the build-design skill.\n"
+            f"Read the newest context .md file from this directory on disk (there is "
+            f"no chat attachment): {ctx_dir}\n"
+            f"  STORY: {story}\n"
+            f"Explore the repository READ-ONLY to establish what already exists: the "
+            f"classes, interfaces and endpoints this change touches, the closest "
+            f"existing precedent, and what must not break. A design written from the "
+            f"story alone is a guess about a system you have not looked at.\n"
+            f"Write the technical design to this EXACT file (its parent .harness "
+            f"ALREADY EXISTS, do not mkdir, shell is disallowed): {design_file}\n"
+            f"Every decision must cite the acceptance criteria it serves by id "
+            f"(AC-1, AC-2.1), name at least one rejected alternative and why, and "
+            f"state its trade-off. A decision with no alternative is an assertion — "
+            f"a reader cannot tell whether options were weighed or the first idea "
+            f"was taken.\n"
+            f"THIS IS A DESIGN PHASE ONLY. You MUST NOT create, edit or write any "
+            f".java file, any source file, or any test file. Do NOT implement "
+            f"anything. Do NOT restate or alter the acceptance criteria — cite them "
+            f"by id. Method signatures and interface changes are in scope; "
+            f"implementation bodies are not.\n"
+            f"Write ONLY {design_file}."
+        ),
         "coding": (
             f"Implement the change described in {plan_file} for:\n  STORY: {story}\n"
             f"Edit ONLY application source under {src_main}/. Do NOT create or edit any test files."
@@ -756,6 +785,47 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         ),
         "code_review": code_review_task,
         "unit_testing": unit_testing_task,
+        # Validation is NOT a code review. It starts from the acceptance criteria
+        # and rules on each one; code review starts from the diff. A reviewer can
+        # honestly pass a clean diff while a criterion is silently unimplemented,
+        # because nothing in the diff is wrong — the problem is code that is absent.
+        "validation": (
+            f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
+            f"and do NOT wait for input. Use the build-validation skill.\n"
+            f"Read the newest context .md file from this directory on disk (there is "
+            f"no chat attachment): {ctx_dir}\n"
+            f"  STORY: {story}\n"
+            f"Take EVERY acceptance criterion verbatim with its identifier, then rule "
+            f"on each one independently against the code as it now stands. Work "
+            f"criterion by criterion, NOT file by file: reading the code first and "
+            f"matching criteria to it afterwards is how an unimplemented criterion "
+            f"gets overlooked, because nothing on screen is missing.\n"
+            f"Each criterion gets exactly ONE verdict — MET, NOT_MET or UNVERIFIABLE "
+            f"— with specific evidence: a named class, method or test, never a "
+            f"restatement of the criterion. A criterion with no verdict is a failure "
+            f"of this check, not an omission; the harness cross-checks the count "
+            f"against the context file.\n"
+            f"Read each criterion LITERALLY. If it says 400, a 422 is NOT_MET. If it "
+            f"says case-insensitive, a case-sensitive match is NOT_MET even though "
+            f"the happy path passes. A passing test is evidence only if it asserts "
+            f"what the criterion actually requires — check that before citing it.\n"
+            f"Do NOT round UNVERIFIABLE up to MET: an unverified criterion is "
+            f"unknown, not satisfied, and is the one most likely to be broken "
+            f"because nothing has ever exercised it.\n"
+            f"Write the result to this EXACT file (its parent .harness ALREADY "
+            f"EXISTS, do not mkdir, shell is disallowed): {validation_file}\n"
+            f"The verdict line is machine-read and its form is fixed — emit exactly "
+            f"one of:\n"
+            f"  **VERDICT: PASS**                 (every criterion MET)\n"
+            f"  **VERDICT: CHANGES_REQUESTED**    (one or more NOT_MET)\n"
+            f"  **VERDICT: INCONCLUSIVE**         (no NOT_MET, but one or more UNVERIFIABLE)\n"
+            f"and head each criterion with '### AC-<n> — MET|NOT_MET|UNVERIFIABLE'.\n"
+            f"VALIDATION OBSERVES, IT DOES NOT FIX. You MUST NOT create or edit any "
+            f"source file or test file. A validator that edits the thing it is "
+            f"judging has no standing. Do NOT comment on code quality — that is the "
+            f"code review phase's job.\n"
+            f"Write ONLY {validation_file}."
+        ),
         "documentation": (
             f"Document the change as a markdown file under {docs_dir}/ (the directory "
             f"ALREADY EXISTS, do not mkdir, shell is disallowed) for:\n  STORY: {story}\n"
@@ -766,7 +836,19 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"this EXACT file (parent .harness ALREADY EXISTS, shell disallowed): "
             f"{pr_body}\n  STORY: {story}\nWrite ONLY {pr_body}."
         ),
-    }[phase.id]
+    }
+
+    # A phase added to phases.py but not here previously died with a bare
+    # KeyError deep inside asyncio, reported as SDK_ERROR — which reads like a
+    # Copilot or network failure rather than a missing prompt. Fail with the
+    # actual cause instead.
+    if phase.id not in base:
+        raise KeyError(
+            f"No task prompt defined for phase '{phase.id}'. Every phase in "
+            f"phases.py needs an entry in _phase_instruction. Defined: "
+            f"{sorted(base)}"
+        )
+    base = base[phase.id]
 
     out = base
     if run.last_feedback and run.approvals.get(phase.id) == "rejected":
