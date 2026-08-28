@@ -791,7 +791,24 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         ),
         "coding": (
             f"Implement the change described in {plan_file} for:\n  STORY: {story}\n"
-            f"Edit ONLY application source under {src_main}/. Do NOT create or edit any test files."
+            f"Edit ONLY application source under {src_main}/. Do NOT create or edit any test files.\n"
+            f"IF THIS CHANGE NEEDS SOMETHING YOU ARE NOT ALLOWED TO WRITE — a new "
+            f"dependency in pom.xml, a build or plugin configuration change, "
+            f"anything outside {src_main}/ — STOP and DECLARE it instead of "
+            f"working around it. Write {rr}/.harness/blocked.md containing "
+            f"exactly:\n"
+            f"  **BLOCKED: MANUAL_CHANGE_REQUIRED**\n"
+            f"  NEEDS: <one line — what is required>\n"
+            f"  FILE: <the file a human must change>\n"
+            f"  WHY: <why you cannot make this change yourself>\n"
+            f"  SUGGESTED: <the exact change, e.g. the dependency coordinates>\n"
+            f"then write nothing else and finish. A human will make the change and "
+            f"resume this run from this phase.\n"
+            f"Do NOT substitute a hand-rolled version of a library to avoid asking, "
+            f"and do NOT write code against a library that is not on the classpath — "
+            f"that produces a build failure this harness will loop on and never "
+            f"resolve, because no phase here is permitted to add the dependency. "
+            f"Asking costs one phase; working around it costs the whole run."
             f"{_approved_block}"
         ),
         "code_review": code_review_task,

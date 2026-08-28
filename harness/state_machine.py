@@ -187,9 +187,40 @@ class StateMachine:
                          f"{_ran - 1} time(s) (cap {_cfg_cap}); halting instead of "
                          f"looping again.")
                 self.log("    The gates kept sending work back to this phase and it "
-                         "did not converge. This needs a human: read the phase's last "
-                         "output and the validation failure, fix the underlying cause, "
-                         "then re-run.")
+                         "did not converge.")
+                # Name the gate that did the sending. Without this the operator gets
+                # a generic "read the last output" message and has to scroll back
+                # through several loops to work out which check was unsatisfied —
+                # and the gate's own halt message, with its remedies, never printed
+                # because the cap fired first.
+                _last = (getattr(run, "halt_detail", None) or "")
+                _hint = {
+                    "coverage": ("The coverage gate was the last to send work back. Ways "
+                                 "forward:\n"
+                                 "      1. Add the missing tests by hand on "
+                                 f"harness-wip/{run.feature_id}, push, then resume from "
+                                 "'unit_testing'.\n"
+                                 "      2. If the uncovered lines are not meaningfully "
+                                 "testable (config classes, data holders, defensive "
+                                 "branches), lower min_coverage in the SERVICE repo's "
+                                 ".harness/config.yaml — with a reason.\n"
+                                 "      3. Resume from 'unit_testing' for a fresh set of "
+                                 "attempts. Weakest option: same inputs, different sample.\n"),
+                    "code_review": ("The reviewer kept requesting changes. Read "
+                                    ".harness/review.md, fix the code by hand on "
+                                    f"harness-wip/{run.feature_id}, then resume from "
+                                    "'code_review'.\n"),
+                    "test_build": ("The build kept failing. Read the failure tail above, "
+                                   f"fix it on harness-wip/{run.feature_id}, then resume "
+                                   "from the phase that owns it.\n"),
+                }.get(_last.split(":")[0].strip().lower() if _last else "", "")
+                if _hint:
+                    self.log("    " + _hint)
+                else:
+                    self.log("    Read the phase's last output and the gate that preceded "
+                             "it, fix the underlying cause, then resume.")
+                self.log(f"    Resume with: feature_id={run.feature_id}, resume=true, "
+                         f"start_phase={phase.id}")
                 run.status = "halted"
                 run.halt_gate = HG.PHASE_RUN_CAP
                 run.halt_reason = (
@@ -249,6 +280,15 @@ class StateMachine:
         # Denials are per-attempt: a phase that is re-entered should report what
         # IT refused, not what a previous attempt did.
         run.denied_writes = []
+
+        # Same for a declared blocker. A resumed run whose human fixed the pom
+        # must not halt again on the declaration that asked them to.
+        try:
+            _bf = self.repo_root / ".harness" / "blocked.md"
+            if _bf.is_file():
+                _bf.unlink()
+        except Exception:
+            pass
 
         _t_start = time.time()
 
@@ -310,6 +350,37 @@ class StateMachine:
             run.last_feedback = halt_msg
             run.status = "halted"
             run.halt_gate = HG.SCOPE
+            run.save(self.harness_dir)
+            return run
+
+        # ---- DECLARED BLOCKER: a phase asked for human help ----
+        # Checked before everything else, including the success path: a phase can
+        # complete its writes and still be unable to finish the job, and that
+        # declaration must not be buried under a green exit code.
+        #
+        # This is the counterpart to the write boundary. The boundary stops an
+        # agent doing what it must not; this lets it SAY what it needs instead of
+        # thrashing against the rule. A run that halts here has cost one phase,
+        # not three retries and a confusing cap message.
+        try:
+            from blocked import (read_declaration, looks_like_build_file,
+                                 halt_message, BLOCKED_FILE)
+            _decl = read_declaration(self.repo_root)
+            _detected = None if _decl.declared else looks_like_build_file(
+                getattr(run, "denied_writes", None))
+        except Exception:
+            _decl, _detected, BLOCKED_FILE = None, None, ".harness/blocked.md"
+
+        if _decl is not None and (_decl.declared or _detected):
+            msg = halt_message(run.feature_id, phase.id, _decl, _detected)
+            if _detected and not _decl.declared:
+                msg += ("  (The phase tried to write this file rather than declaring it.\n"
+                        "   The write was refused; nothing was changed.)\n")
+            self.log(msg)
+            run.status = "halted"
+            run.halt_gate = HG.MANUAL_CHANGE_REQUIRED
+            run.halt_detail = (_decl.needs or f"manual change needed in {_detected}")[:200]
+            run.last_feedback = msg
             run.save(self.harness_dir)
             return run
 
@@ -568,6 +639,7 @@ class StateMachine:
                         for it in rv.issues:
                             self.log("      • " + it)
                         issues_block = "\n".join(f"- {i}" for i in rv.issues) or "- (see review.md)"
+                        run.halt_detail = "code_review: changes requested"
                         run.last_feedback = (
                             "An INDEPENDENT code reviewer requested changes. Fix the "
                             "production code to address every issue below. Do not edit "
@@ -699,6 +771,9 @@ class StateMachine:
                                 + "Coverage detail:\n" + vr.output_tail
                             )
                             # reset ONLY the unit_testing iteration budget so it can act
+                            # Recorded so a later PHASE_RUN_CAP halt can name the gate
+                            # that kept sending work back, instead of a generic message.
+                            run.halt_detail = "coverage: below threshold"
                             run.iterations[cov_loop] = 0
                             run.approvals[cov_loop] = "rejected"
                             run.current_phase = cov_loop
@@ -722,13 +797,21 @@ class StateMachine:
                             f"{', '.join(run.changed_main_files) if run.changed_main_files else '(none recorded)'}\n"
                             f"  Measured in report : "
                             f"{', '.join(measured) if measured else '(none matched JaCoCo rows)'}\n"
-                            "  Recommendation     : a human should review whether the "
-                            "remaining uncovered lines are practically testable (e.g. "
-                            "defensive branches, generated code, or framework glue). "
-                            "Either add targeted tests by hand, lower min_coverage for this "
-                            "story with justification, or exclude non-meaningful lines from "
-                            "JaCoCo. The tests that DO exist are green; only the coverage "
+                            "  The tests that DO exist are green; only the coverage "
                             "threshold blocks the PR.\n"
+                            "  Ways forward:\n"
+                            "    1. Add the missing tests by hand:\n"
+                            f"         git checkout harness-wip/{run.feature_id}\n"
+                            "       write the tests, push, then re-run with resume=true "
+                            f"and start_phase={cfg.coverage_loopback_phase}.\n"
+                            "    2. If the uncovered lines are not meaningfully testable "
+                            "(Spring @Configuration classes, data holders, defensive "
+                            "branches), lower min_coverage in the SERVICE repo's "
+                            ".harness/config.yaml — and record why. Do this because the "
+                            "bar is wrong, not because this run failed.\n"
+                            "    3. Resume from "
+                            f"'{cfg.coverage_loopback_phase}' for a fresh set of attempts. "
+                            "Weakest option: same inputs, different sample.\n"
                             "  ======================================================\n"
                         )
                         self.log(halt_msg)
@@ -785,6 +868,7 @@ class StateMachine:
                         self.log(f"  ! VALIDATION_FAILED ({'test-side' if test_side else 'main-side'}) "
                                  f"— looping back to '{loopback}' "
                                  f"(attempt {run.validation_attempts}/{cfg.max_validation_retries})")
+                        run.halt_detail = "test_build: build or tests failing"
                         run.last_feedback = fix_instruction + vr.output_tail
                         # reset iteration budget for the loopback phase so it can act
                         run.iterations[loopback] = 0
