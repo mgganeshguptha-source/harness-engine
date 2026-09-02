@@ -111,6 +111,27 @@ def _failure_is_in_tests(output: str) -> bool:
         return False
     text = str(output)
 
+    # ---- signatures that are unambiguously the TEST's own fault ----
+    # A failing assertion usually means production is wrong, but some runtime
+    # failures can only come from the test itself, and routing those to 'coding'
+    # sends work to a phase that may not write test files at all. Observed in run
+    # 33199xxxxx: an unstubbed mock returned null, the NPE was classified
+    # main-side, and 'coding' was asked twice to fix a defect in a test it is
+    # forbidden from touching.
+    low = text.lower()
+    test_only = (
+        # Mockito misuse: unnecessary stubbing, wrong argument matchers, etc.
+        "org.mockito.exceptions.misusing" in low
+        or "unnecessarystubbing" in low
+        or "invalidusewiththematchers" in low
+        # An unstubbed mock returns null; the NPE then names the mocked method.
+        or ("nullpointerexception" in low
+            and "because the return value of" in low
+            and "mock" not in low.split("nullpointerexception")[0][-200:])
+    )
+    if test_only:
+        return True
+
     compile_failure = ("COMPILATION ERROR" in text.upper()
                        or "Compilation failure" in text
                        or "cannot find symbol" in text
@@ -352,6 +373,34 @@ class StateMachine:
             run.halt_gate = HG.SCOPE
             run.save(self.harness_dir)
             return run
+
+        # ---- PLAN PATH CHECK ----
+        # Runs after prompt_steps, before any code is written. The planning phase
+        # can produce a perfectly reasonable-looking plan against packages that do
+        # not exist — it did on run OP0-014, inferring com.example.bookservice from
+        # the project name without reading the tree. The coding phase cannot create
+        # directories, so such a plan is unexecutable, and discovering that in
+        # coding costs a full expensive phase. A directory listing costs nothing.
+        if phase.id == "prompt_steps" and code == ExitCode.OK:
+            try:
+                from plan_check import check_plan, halt_message as _plan_msg
+                from config import HarnessConfig as _HCp
+                _cfgp = _HCp.load(self.harness_dir, repo_root=self.repo_root)
+                _pf = self.repo_root / ".harness" / "prompt-steps.md"
+                _pr = check_plan(self.repo_root, _pf, _cfgp.target_module, log=self.log)
+                if _pr.missing_dirs:
+                    _m = _plan_msg(_pr, _pf)
+                    self.log(_m)
+                    run.status = "halted"
+                    run.halt_gate = HG.SCOPE
+                    run.halt_detail = "plan references directories that do not exist"
+                    run.last_feedback = _m
+                    run.save(self.harness_dir)
+                    return run
+                if _pr.checked:
+                    self.log(f"  [harness] plan paths: {_pr.checked} checked, all resolve")
+            except Exception as _e:
+                self.log(f"  [harness] plan path check skipped ({type(_e).__name__})")
 
         # ---- DECLARED BLOCKER: a phase asked for human help ----
         # Checked before everything else, including the success path: a phase can
@@ -840,6 +889,21 @@ class StateMachine:
                     # ============================================================
                     run.validation_attempts += 1
                     test_side = _failure_is_in_tests(vr.output_tail)
+
+                    # ALTERNATE ON REPEAT. A failing test can be the fault of
+                    # either side, and no heuristic reads a stack trace reliably
+                    # enough to be right twice. If the previous attempt sent this
+                    # to one phase and the build is still red, that phase either
+                    # could not fix it or fixed the wrong thing — so try the other
+                    # one rather than spending the whole retry budget on a
+                    # classification that has already been shown not to work.
+                    _prev = getattr(run, "last_validation_loopback", "") or ""
+                    _would_be = (cfg.test_failure_loopback_phase if test_side
+                                 else cfg.validation_loopback_phase)
+                    if _prev and _prev == _would_be and run.validation_attempts > 1:
+                        test_side = not test_side
+                        self.log(f"  [harness] '{_prev}' already had this failure and the "
+                                 f"build is still red — routing to the other side instead")
                     if test_side:
                         loopback = cfg.test_failure_loopback_phase
                         fix_instruction = (
@@ -871,6 +935,7 @@ class StateMachine:
                         run.halt_detail = "test_build: build or tests failing"
                         run.last_feedback = fix_instruction + vr.output_tail
                         # reset iteration budget for the loopback phase so it can act
+                        run.last_validation_loopback = loopback
                         run.iterations[loopback] = 0
                         run.approvals[loopback] = "rejected"  # forces re-run semantics
                         run.current_phase = loopback

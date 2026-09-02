@@ -53,6 +53,11 @@ class RunState:
     # halt message can name them instead of telling the developer to go and read
     # the log. Reset at the start of every phase.
     denied_writes: list = field(default_factory=list)
+    # Where the previous validation loopback sent the work. Used to alternate:
+    # if a build failure was sent to one phase and the build is still red, sending
+    # it to the same phase again is unlikely to help, and no classifier is
+    # reliable enough to be trusted twice in a row.
+    last_validation_loopback: str = ""
 
     # how many times the AC-conformance gate has failed and looped back
     # (independent of the review, validation and coverage budgets).
