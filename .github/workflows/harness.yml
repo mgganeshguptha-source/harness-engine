@@ -42,6 +42,15 @@ on:
         description: "Story / feature id to run"
         required: true
         type: string
+      base:
+        description: >-
+          Development branch to run against and open the PR into (e.g. PM_Sep,
+          VoC_Oct). The story file and existing code are read from this branch,
+          and the harness PR targets it. Blank uses the repository's default
+          branch.
+        required: false
+        default: ""
+        type: string
       java-version:
         required: false
         default: "17"
@@ -113,7 +122,7 @@ jobs:
         with:
           path: service
           fetch-depth: 0
-          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || github.ref }}
+          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || (inputs.base != '' && inputs.base) || github.ref }}
 
       - name: Verify resume state
         if: inputs.resume
@@ -429,6 +438,9 @@ jobs:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           FEATURE="${{ inputs.feature_id }}"
+          # PR targets the base dev branch the run was launched against (e.g.
+          # PM_Sep), falling back to the triggering branch when base is blank.
+          PR_BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
           # Same scheme as the audit branch. No outcome segment — this branch only
           # exists on success.
           STAMP=$(date -u +%Y%m%d-%H%M)
@@ -438,9 +450,9 @@ jobs:
           git checkout -B "$BRANCH"
           git push origin "$BRANCH"
           if [ -f .harness/pr-body.md ]; then
-            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base main --head "$BRANCH" || echo "PR create skipped"
+            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base "$PR_BASE" --head "$BRANCH" || echo "PR create skipped"
           else
-            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base main --head "$BRANCH" || echo "PR create skipped"
+            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "$PR_BASE" --head "$BRANCH" || echo "PR create skipped"
           fi
 
       # --- 10. tell the human how to continue when the run halted ---
