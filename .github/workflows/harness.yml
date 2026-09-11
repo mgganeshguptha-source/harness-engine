@@ -329,6 +329,12 @@ jobs:
           # so nothing the agent wrote is lost.
           git checkout -B "$WIP_BRANCH"
           git add -A 2>/dev/null || true
+          # The service repo's .gitignore deliberately excludes the run workspace
+          # (.harness/run-state.json, .harness/blocked.md) so it never pollutes
+          # normal dev branches. But the WIP branch is the resume point and MUST
+          # carry that state, or `resume=true` fails with "no run-state.json".
+          # Force-add them here so they land on the WIP branch only.
+          git add -f .harness/run-state.json .harness/blocked.md 2>/dev/null || true
           STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
           if git diff --cached --quiet; then
             echo "Nothing new to commit on $WIP_BRANCH."
