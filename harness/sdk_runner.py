@@ -1122,6 +1122,15 @@ class SdkAgentRunner:
         _cfg = _HC.load(repo_root / ".harness")
         phase_model = (_cfg.model_for_phase(phase.id) if _cfg else None) or self.model
         self.log(f"  [model] phase '{phase.id}' -> {phase_model}")
+        # Record the model for THIS attempt before the SDK runs, so a phase that
+        # errors mid-call still leaves a record of which model it tried. Loopbacks
+        # re-enter this method and append a fresh entry (one per attempt). The
+        # state_machine's credit reader reads the tail of this log to attribute a
+        # credit delta to the right model.
+        try:
+            run.phase_model_log.append({"phase": phase.id, "model": phase_model})
+        except Exception:
+            pass
         if phase.id == "code_review" and _cfg and _cfg.review_model_conflict():
             self.log("  [warn] reviewer model == coding model — review independence is "
                      "reduced; set review_model to a different model for a true "

@@ -50,6 +50,35 @@ _HALTING = {
 }
 
 
+def _read_phase_credits(when: str, phase_id: str, settle: int, log=print):
+    """Read the account's AI-credit counter around a single phase attempt.
+
+    `when` is "before" or "after" (only the "after" read waits). `settle` is the
+    wait in seconds, from the service repo's config.yaml (credit_settle_seconds):
+        > 0  -> wait `settle` seconds before the "after" read, so GitHub's
+                account-level counter (which LAGS the requests that produced it)
+                has time to catch up — a more accurate per-phase figure.
+        0    -> read IMMEDIATELY, no wait. The figure is rough (the counter may
+                not have moved yet) but the run is faster. Per-phase MODEL is
+                recorded regardless; only credit accuracy is affected.
+
+    Returns a float (credits consumed this billing month) or None when the counter
+    is unreadable (org-billed seats, missing token permission). NEVER raises: a
+    billing read must never be the reason a phase fails.
+    """
+    try:
+        if when == "after" and settle > 0:
+            log(f"  [credits] phase '{phase_id}': waiting {settle}s for the "
+                f"billing counter to settle")
+            time.sleep(settle)
+        from ai_credits import read_credits_used
+        return read_credits_used(log=log)
+    except Exception as e:
+        log(f"  [credits] phase '{phase_id}' {when}-read failed "
+            f"({e.__class__.__name__}) — recording None")
+        return None
+
+
 # Maven paths/goals that identify a failure as belonging to TEST sources.
 _TEST_PATH = re.compile(r"[/\\]src[/\\]test[/\\]", re.IGNORECASE)
 _TEST_GOAL = re.compile(r"(maven-compiler-plugin[^\n]*?:testCompile"
@@ -319,8 +348,49 @@ class StateMachine:
         # small epsilon to tolerate coarse filesystem mtime granularity.
         _phase_started = time.time() - 1.0
 
+        # Per-phase credit attribution. Read the billing counter immediately
+        # before the phase and (after a settle-wait) immediately after, so the
+        # delta is this phase attempt's estimated cost. Loopbacks re-enter here and
+        # append another entry — one per attempt. Both reads tolerate an
+        # unreadable counter (org-billed seats) by recording None; the run-level
+        # credits_actual delta remains the authoritative figure. The settle wait is
+        # the service repo's credit_settle_seconds (0 => read immediately, no wait).
+        try:
+            from config import HarnessConfig as _HCc
+            _settle = int(getattr(_HCc.load(self.harness_dir), "credit_settle_seconds", 30))
+        except Exception:
+            _settle = 30
+        _credits_before = _read_phase_credits("before", phase.id, _settle, self.log)
+
         code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        _credits_after = _read_phase_credits("after", phase.id, _settle, self.log)
+        _phase_credits = None
+        if _credits_before is not None and _credits_after is not None:
+            _delta = round(_credits_after - _credits_before, 4)
+            # A zero/zero pair means the counter read as 0 both times (no usage
+            # visible) — record 0.0 only if it actually moved; otherwise None so a
+            # blank counter is not mistaken for a free phase.
+            _phase_credits = _delta if not (_credits_before == 0 and _credits_after == 0) else None
+        # The model for this attempt is the tail of phase_model_log (sdk_runner
+        # appended it before the SDK call). Fall back to None for a fake/no-SDK run.
+        try:
+            _phase_model = (run.phase_model_log[-1].get("model")
+                            if run.phase_model_log else None)
+        except Exception:
+            _phase_model = None
+        try:
+            run.phase_credit_log.append({
+                "phase": phase.id,
+                "model": _phase_model,
+                "credits": _phase_credits,
+                "before": _credits_before,
+                "after": _credits_after,
+                "is_estimate": True,
+            })
+        except Exception:
+            pass
 
         # Accumulate, don't overwrite: a phase re-entered by a loopback should
         # report the total time it consumed across the run, not just the last go.

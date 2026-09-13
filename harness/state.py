@@ -73,6 +73,21 @@ class RunState:
     # per-phase token usage + the model used, in execution order, for the
     # phase-by-phase report (build_context = N tokens, running total, ...).
     phase_token_log: list = field(default_factory=list)
+    # per-phase MODEL, one entry per phase ATTEMPT in execution order (loopbacks
+    # append a new entry). Recorded before the SDK call, so a phase that errors
+    # still records which model it tried. Entry: {"phase": id, "model": name}.
+    phase_model_log: list = field(default_factory=list)
+    # per-phase CREDIT reading, one entry per phase attempt (loopbacks append).
+    # Credits are read from GitHub's billing counter before and after each phase;
+    # the delta is an ESTIMATE — the counter is account-level, not per-request, so
+    # the figure is valid only if nothing else on the account ran during the phase.
+    # `credits_actual` (the run-level before/after delta) stays the authoritative
+    # total. Entry:
+    #   {"phase": id, "model": name, "credits": float|None,
+    #    "before": float|None, "after": float|None, "is_estimate": True}
+    # `credits` is None when the counter was unreadable (org-billed seats) —
+    # stored cleanly, never guessed.
+    phase_credit_log: list = field(default_factory=list)
 
     # ---- persistence ----
     def save(self, harness_dir: Path) -> None:

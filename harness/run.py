@@ -124,8 +124,23 @@ def cmd_autorun(args):
         # harness reported 28.12 while the settled page figure moved by ~37.
         # A short pause recovers most of that. It is not a guarantee — the delta
         # is labelled a lower bound in the report for the same reason.
-        _LAG_WAIT = int(os.environ.get("HARNESS_CREDIT_SETTLE_SECONDS", "45"))
-        if _LAG_WAIT > 0:
+        #
+        # When per-phase credit reads ran (phase_credit_log populated), the
+        # counter was already read + settled after the FINAL phase, so this
+        # run-level pause would just wait a second time for nothing. Skip it and
+        # read straight through. Otherwise honour the service repo's
+        # credit_settle_seconds (0 => read immediately).
+        _per_phase_ran = bool(getattr(run, "phase_credit_log", None))
+        try:
+            from config import HarnessConfig as _HCw
+            _LAG_WAIT = int(getattr(_HCw.load(_harness_dir(repo)),
+                                    "credit_settle_seconds", 30))
+        except Exception:
+            _LAG_WAIT = 30
+        if _per_phase_ran:
+            print("  [credits] per-phase reads already settled the counter — "
+                  "skipping the run-level wait")
+        elif _LAG_WAIT > 0:
             print(f"  [credits] waiting {_LAG_WAIT}s for the billing counter to settle")
             time.sleep(_LAG_WAIT)
         try:
@@ -344,6 +359,30 @@ def _report(run: RunState):
             model = f"[{e.get('model','')}]"
             print(f"    {e['phase']:<14}{model:<22} "
                   f"{e['phase_tokens']:>7} tok")
+
+    # Per-phase CREDIT breakdown (estimate). One row per phase attempt, so a
+    # loopback shows as a repeated phase — that is deliberate: it reveals which
+    # re-entry burned credits. Credits are the account-level counter delta around
+    # each phase, valid only if nothing else ran on the account during it, hence
+    # "est". A blank cell means the counter was unreadable (org-billed seats).
+    _pcl = getattr(run, "phase_credit_log", None) or []
+    if _pcl:
+        print("\n  credits by phase (estimate — account-level counter):")
+        _sum = 0.0
+        _any = False
+        for e in _pcl:
+            _c = e.get("credits")
+            _model = f"[{e.get('model') or ''}]"
+            if _c is None:
+                print(f"    {e['phase']:<14}{_model:<22}      -- cr")
+            else:
+                _sum += _c
+                _any = True
+                print(f"    {e['phase']:<14}{_model:<22} {_c:>7.2f} cr")
+        if _any:
+            print(f"    {'(sum est.)':<14}{'':<22} {_sum:>7.2f} cr")
+        print("    note: per-phase figures are estimates; the authoritative total "
+              "is the run-level actual-credits delta below.")
 
     # Aggregate token counts. Cost is NOT derived from these — the billed figure
     # comes from GitHub's billing API delta printed below.

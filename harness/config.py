@@ -369,6 +369,21 @@ class HarnessConfig:
     # it. Deleting is never the engine's job (the engine never mutates remote refs).
     retain_audit_branch: bool = True
 
+    # --- per-phase credit settle wait (seconds) ---
+    # The metrics layer reads GitHub's AI-credit counter before and after each
+    # phase to estimate that phase's cost. That counter LAGS the requests that
+    # produced it, so this is how long to wait after a phase finishes before
+    # taking the "after" reading.
+    #   > 0  -> wait this many seconds, then read (more accurate; the counter has
+    #           had time to settle). Default 30.
+    #   0    -> read IMMEDIATELY, no wait. Faster runs, but the per-phase figure is
+    #           rough — the counter may not have caught up. Per-phase MODEL is still
+    #           recorded either way; only the credit accuracy is affected.
+    # Runtime cost note: a non-zero value is paid on EVERY phase attempt (loopbacks
+    # too), so 30s across nine phases adds ~4.5 min of pure waiting. Lower it, or
+    # set 0, on repos where fast runs matter more than per-phase credit precision.
+    credit_settle_seconds: int = 30
+
     @classmethod
     def load(cls, harness_dir: Path, repo_root: Path | None = None) -> "HarnessConfig":
         p = harness_dir / "config.yaml"
@@ -424,6 +439,7 @@ class HarnessConfig:
                            if data.get("write_exclude") is not None
                            else cls().write_exclude),
             retain_audit_branch=bool(data.get("retain_audit_branch", cls.retain_audit_branch)),
+            credit_settle_seconds=int(data.get("credit_settle_seconds", cls.credit_settle_seconds)),
         )
 
         # --- coverage threshold units normalization ---

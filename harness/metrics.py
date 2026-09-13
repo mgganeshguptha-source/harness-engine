@@ -53,7 +53,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -159,6 +159,32 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
             rec[key] = rec.get(key, 0) + int(entry.get("phase_tokens") or 0)
     for pid, secs in durations.items():
         rec[f"dur_{pid}"] = secs
+
+    # Per-phase MODEL and CREDITS (schema v2). model_<phase> is the model that ran
+    # the phase; credits_<phase> is the estimated credit cost SUMMED across every
+    # attempt of that phase (loopbacks add up). Credits are an estimate — the
+    # account-level counter is not per-request — so credits_actual stays the
+    # authoritative total. A phase whose credit reads were all unreadable
+    # (org-billed seats, or per-phase reads disabled) emits NO credits_<phase>
+    # key at all, rather than a 0 that would understate cost. On a loopback the
+    # model can differ per attempt; the LAST attempt's model wins the model_<phase>
+    # slot (it is the one that produced the phase's final output).
+    _credit_sums: dict = {}
+    _credit_seen: dict = {}
+    for entry in (getattr(run, "phase_credit_log", None) or []):
+        pid = entry.get("phase")
+        if not pid:
+            continue
+        model = entry.get("model")
+        if model:
+            rec[f"model_{pid}"] = model      # last attempt wins
+        c = entry.get("credits")
+        if c is not None:
+            _credit_sums[pid] = round(_credit_sums.get(pid, 0.0) + float(c), 4)
+            _credit_seen[pid] = True
+    for pid, total in _credit_sums.items():
+        if _credit_seen.get(pid):
+            rec[f"credits_{pid}"] = total
 
     _add_context_metrics(rec, repo_root, cfg, log)
     _add_validation_metrics(rec, repo_root, log)
