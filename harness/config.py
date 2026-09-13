@@ -353,6 +353,22 @@ class HarnessConfig:
         "**/*MapperImpl.java",   # MapStruct-generated mapper impls
     ])
 
+    # --- audit branch retention (compliance policy — the SERVICE repo owns this) ---
+    # The immutable per-run audit branch (harness-audit/<feature>/<stamp>-<outcome>-<run_id>)
+    # is written on every run, success OR halt. Whether it is RETAINED afterwards is
+    # a compliance decision, not an engine decision — so it lives here in the service
+    # repo's .harness/config.yaml, where the team that owns the repo (and its
+    # retention obligations) sets it.
+    #   True  (default) -> keep the audit branch. The safe default: for a healthcare
+    #                      client the full run trail should persist unless someone
+    #                      with retention authority chooses otherwise.
+    #   False           -> the workflow deletes the audit branch after pushing it,
+    #                      for repos where the run trail is captured elsewhere and
+    #                      per-run branches are unwanted clutter.
+    # The engine only records this value into run-summary.json; the workflow acts on
+    # it. Deleting is never the engine's job (the engine never mutates remote refs).
+    retain_audit_branch: bool = True
+
     @classmethod
     def load(cls, harness_dir: Path, repo_root: Path | None = None) -> "HarnessConfig":
         p = harness_dir / "config.yaml"
@@ -407,6 +423,7 @@ class HarnessConfig:
             write_exclude=(data.get("write_exclude")
                            if data.get("write_exclude") is not None
                            else cls().write_exclude),
+            retain_audit_branch=bool(data.get("retain_audit_branch", cls.retain_audit_branch)),
         )
 
         # --- coverage threshold units normalization ---

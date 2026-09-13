@@ -261,6 +261,17 @@ def cmd_collect_audit(args):
     hd = _harness_dir(repo)
     ctx_dir = repo / ".github" / "story-context-files"
 
+    # Audit-branch retention is a compliance policy the SERVICE repo owns
+    # (.harness/config.yaml). The engine does not act on it — it only records the
+    # resolved value here so the workflow, which owns remote refs, can honour it.
+    # Load defensively: a missing/broken config must never break audit collection,
+    # so fall back to the safe default (retain).
+    try:
+        from config import HarnessConfig
+        retain_audit_branch = HarnessConfig.load(hd, repo_root=repo).retain_audit_branch
+    except Exception:
+        retain_audit_branch = True
+
     copied = []
     # newest context file (the agent may write a timestamped name)
     if ctx_dir.is_dir():
@@ -280,6 +291,9 @@ def cmd_collect_audit(args):
         "feature": feature,
         "run_id": run_id,
         "status": run.status,
+        # Compliance policy from the service repo's .harness/config.yaml. The
+        # workflow reads this to decide whether to keep the per-run audit branch.
+        "retain_audit_branch": retain_audit_branch,
         "completed_phases": run.completed_phases,
         "total_tokens": run.total_tokens,
         "phase_token_log": run.phase_token_log,
