@@ -170,6 +170,40 @@ def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str
     return joined
 
 
+def _is_environment_failure(exit_code: int, output: str) -> bool:
+    """True when the BUILD COULD NOT RUN — an environment/tooling problem, not a
+    code or test failure. No coding or unit_testing phase can fix these, so the
+    state machine halts immediately rather than looping model phases against them.
+
+    The distinction is 'did the build start': exit 126/127 and the signatures
+    below mean the shell never got the build tool running. Anything where Maven
+    (or the configured tool) actually started and THEN failed — a compile error,
+    a red test — returns False and follows the normal test/coverage routing.
+    """
+    # 126 = found but not executable (e.g. ./mvnw without the +x bit).
+    # 127 = command not found (missing wrapper / mvn not on PATH).
+    if exit_code in (126, 127):
+        return True
+    low = (output or "").lower()
+    # The build tool itself could not be launched. These strings appear when the
+    # shell or the JVM launcher failed BEFORE any build lifecycle ran. Kept
+    # deliberately narrow so a normal BUILD FAILURE (compile/test) never matches.
+    signatures = (
+        "mvnw: permission denied",
+        "mvnw: not found",
+        "./mvnw: 1: ",                       # sh wrapper error prefix on a broken mvnw
+        "permission denied",                 # generic; paired with 126 above, safe here
+        "no such file or directory",
+        "command not found",
+        "unable to access jarfile",
+        "could not create the java virtual machine",
+        "no java virtual machine",
+        "java_home is not defined",
+        "error: could not find or load main class",
+    )
+    return any(s in low for s in signatures)
+
+
 def run_validation(repo_root: Path, harness_dir: Path, log=print,
                    changed_files: list | None = None) -> ValidationResult:
     cfg = HarnessConfig.load(harness_dir)
@@ -253,6 +287,33 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
 
     passed = proc.returncode == 0
     failure_kind = None if passed else "test"
+
+    # ---- ENVIRONMENT FAILURE: the build never ran ----
+    # exit 126/127 or a launcher error means the tool could not start — the wrapper
+    # isn't executable, isn't found, or the JVM couldn't launch. No code or test
+    # phase can fix this, so mark it distinctly; the state machine halts on it
+    # instead of looping coding/unit_testing against an unfixable error.
+    if not passed and _is_environment_failure(proc.returncode, out):
+        failure_kind = "environment"
+        summary = f"ENVIRONMENT FAILURE (exit {proc.returncode}) — build did not run"
+        log(f"  ! {summary}")
+        log("    The test command could not execute (e.g. ./mvnw not executable, "
+            "not found, or JVM launch failed). This is an environment problem, "
+            "not a code problem — no phase can fix it.")
+        report = harness_dir / "validation-report.txt"
+        try:
+            report.write_text(
+                f"command: {cmd}\nexit_code: {proc.returncode}\n"
+                f"summary: {summary}\n\n--- tail ---\n"
+                + tail.replace("http://", "hxxp://") + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return ValidationResult(
+            False, proc.returncode, summary, tail, failure_kind="environment",
+        )
+
     # Maven prints BUILD SUCCESS / BUILD FAILURE; use exit code as source of truth,
     # the text scan is only for a friendlier summary line.
     if "BUILD SUCCESS" in out:

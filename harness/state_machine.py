@@ -746,6 +746,32 @@ class StateMachine:
                     kind = getattr(vr, "failure_kind", None) or "test"
 
                     # ============================================================
+                    # ENVIRONMENT FAILURE: the build could not run at all (e.g.
+                    # ./mvnw not executable, not found, JVM launch failed). This is
+                    # OUR PLUMBING, not the work — no coding or unit_testing phase
+                    # can fix it, so halt immediately with CONFIG_ERROR instead of
+                    # looping model phases against an unfixable error (which would
+                    # burn the retry budget and real credits for nothing).
+                    # ============================================================
+                    if kind == "environment":
+                        from halt_gates import CONFIG_ERROR
+                        run.status = "halted"
+                        run.halt_gate = CONFIG_ERROR
+                        run.halt_detail = f"environment: {vr.summary}"
+                        self.log("")
+                        self.log("  ================ ENVIRONMENT FAILURE: HALTED ================")
+                        self.log("  The build tooling could not run the tests — this is an")
+                        self.log("  environment problem, not a code problem. No phase can fix it.")
+                        self.log(f"  Detail : {vr.summary}")
+                        self.log("  Likely : the Maven wrapper is not executable or not found.")
+                        self.log("           On the branch, run:")
+                        self.log("             git update-index --chmod=+x mvnw")
+                        self.log("             git commit -m 'make mvnw executable' && git push")
+                        self.log("           then re-run the harness (resume or fresh).")
+                        self.log("  ============================================================")
+                        return
+
+                    # ============================================================
                     # COVERAGE MISS: tests pass but per-change coverage < target.
                     # Loop back to unit_testing to ADD TESTS (never touch source),
                     # on a SEPARATE retry budget. On exhaustion, halt with a
