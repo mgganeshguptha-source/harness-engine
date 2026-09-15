@@ -1,13 +1,13 @@
 # =============================================================================
-# harness-engine/.github/workflows/harness.yml
-# THE REUSABLE ENGINE WORKFLOW  (lives in the harness-engine repo)
+# SDLC-Harness/.github/workflows/harness.yml
+# THE REUSABLE ENGINE WORKFLOW  (lives in the SDLC-Harness repo)
 #
 # Runs in the CALLER's repo context. Supplies the engine + orchestration.
 #
 # THREE CHECKOUTS (a reusable workflow brings none of its own files):
 #   1. the CALLER's service repo  -> ./service   (the code the harness works on)
-#   2. this harness-engine repo   -> ./engine    (the Python engine under harness/)
-#   3. copilot-toolkit            -> ./toolkit   (shared skills + instructions)
+#   2. this SDLC-Harness repo   -> ./engine    (the Python engine under harness/)
+#   3. YOUR-TOOLKIT-REPO            -> ./toolkit   (shared skills + instructions)
 #
 # CENTRAL TOOLKIT MODEL: skills/instructions are NOT committed to service repos
 # (they stay gitignored there). The workflow copies them from the central toolkit
@@ -23,7 +23,7 @@
 # These two checkouts previously used ${{ github.repository_owner }}, which is the
 # owner of the CALLING repo — not the owner of the engine. That silently worked for
 # the harness author (same account) and broke for every other user: a joiner who
-# forked sample-book-service got `repository: <their-name>/harness-engine`, which
+# forked sample-book-service got `repository: <their-name>/SDLC-Harness`, which
 # does not exist. actions/checkout logged "Repository not found" but did NOT fail
 # the step, so the run limped on and died later with a misleading
 # "No such file or directory: engine/harness".
@@ -64,24 +64,24 @@ on:
         default: "20"
         type: string
       engine_ref:
-        description: "Tag/branch of harness-engine to run"
+        description: "Tag/branch of SDLC-Harness to run"
         required: false
         default: "v1"
         type: string
       toolkit_ref:
-        description: "Tag/branch of copilot-toolkit to load (skills + instructions)"
+        description: "Tag/branch of YOUR-TOOLKIT-REPO to load (skills + instructions)"
         required: false
         default: "main"
         type: string
       engine_repo:
         description: "owner/repo holding the harness engine. Canonical location — NOT the caller's account."
         required: false
-        default: "mgganeshguptha-source/harness-engine"
+        default: "YOUR-ORG/SDLC-Harness"
         type: string
       toolkit_repo:
         description: "owner/repo holding the shared skills + instructions."
         required: false
-        default: "mgganeshguptha-source/copilot-toolkit"
+        default: "YOUR-ORG/YOUR-TOOLKIT-REPO"
         type: string
       resume:
         description: >-
@@ -140,10 +140,10 @@ jobs:
           python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
 
       # --- 2. THIS engine repo -> ./engine ---
-      # No token: harness-engine is public, and a public repo is readable by the
+      # No token: SDLC-Harness is public, and a public repo is readable by the
       # runner's default credentials. If it is ever made private, every caller will
       # need a token that can read it — see the note in step 2b.
-      - name: Checkout harness-engine
+      - name: Checkout SDLC-Harness
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.engine_repo }}
@@ -172,13 +172,13 @@ jobs:
           echo "Engine OK: ${{ inputs.engine_repo }}@${{ inputs.engine_ref }}"
 
       # --- 3. the central toolkit -> ./toolkit (skills + instructions) ---
-      # NOTE ON ACCESS: while copilot-toolkit is PRIVATE, the caller's token must be
+      # NOTE ON ACCESS: while YOUR-TOOLKIT-REPO is PRIVATE, the caller's token must be
       # able to read it. A fine-grained PAT can only be scoped to repositories owned
       # by the token's own resource owner, so a joiner's personal PAT CANNOT read a
       # private repo under a different account — even if they are a collaborator.
-      # Workable options: make copilot-toolkit public, or host both repos in an org
+      # Workable options: make YOUR-TOOLKIT-REPO public, or host both repos in an org
       # where members' tokens can be granted access (the BCBSM case).
-      - name: Checkout copilot-toolkit
+      - name: Checkout YOUR-TOOLKIT-REPO
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.toolkit_repo }}
@@ -196,7 +196,7 @@ jobs:
             echo "::error title=Toolkit checkout failed::Could not read ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}."
             echo ""
             echo "Neither toolkit/skills nor toolkit/instructions is present."
-            echo "If copilot-toolkit is private, your fine-grained PAT cannot read it"
+            echo "If YOUR-TOOLKIT-REPO is private, your fine-grained PAT cannot read it"
             echo "unless the repo is owned by your own account or an org that has"
             echo "granted your token access."
             echo ""
@@ -447,8 +447,16 @@ jobs:
           fi
 
       # --- 9. raise the code PR — ONLY on success ---
-      # Branches from the working branch, which by now holds everything the run
-      # produced. Run-scoped so each successful run gets its own reviewable PR.
+      # The PR branch must contain the CODE CHANGE ONLY (src/ + docs/), never the
+      # run workspace (.harness/), the audit trail (audit/) or metrics (metrics/).
+      # Those live on their own branches (harness-audit/*, harness-metrics) and
+      # must not leak into a reviewable, mergeable PR.
+      #
+      # The working tree at this point is the WIP state and holds everything the
+      # run produced, so we do NOT branch from it. Instead we cut the PR branch
+      # CLEAN from origin/<PR_BASE> and restore only src/ and docs/ from the WIP
+      # tree on top of it. Result: the PR diff is exactly the code + docs the run
+      # changed, against the branch it will merge into — nothing else.
       - name: Open pull request with the change (success only)
         id: raise_pr
         if: success()
@@ -466,19 +474,65 @@ jobs:
           BRANCH="harness/${FEATURE}/${STAMP}-${{ github.run_id }}"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
-          git checkout -B "$BRANCH"
+
+          # 1) Stash the code the run produced (src/ + docs/) so it survives the
+          #    branch switch. Also stash the PR body text (used by gh below); it
+          #    lives under .harness/ which we deliberately leave behind, so copy it
+          #    out first. Everything else (.harness/, audit/, metrics/) is dropped.
+          WORKTREE="$(mktemp -d)"
+          if [ -d src ]; then cp -a src "$WORKTREE/src"; fi
+          if [ -d docs ]; then cp -a docs "$WORKTREE/docs"; fi
+          if [ -f .harness/pr-body.md ]; then cp -a .harness/pr-body.md "$WORKTREE/pr-body.md"; fi
+
+          # 2) Cut the PR branch CLEAN from the base dev branch. This gives a tree
+          #    identical to PR_BASE — no run artefacts, correct merge parent.
+          git fetch origin "$PR_BASE"
+          git checkout -B "$BRANCH" "origin/$PR_BASE"
+
+          # 3) Lay the run's src/ and docs/ back on top of the clean base.
+          #    ($WORKTREE is kept until after the PR is opened — it still holds
+          #    pr-body.md, which the gh step below reads.)
+          if [ -d "$WORKTREE/src" ]; then rm -rf src && cp -a "$WORKTREE/src" src; fi
+          if [ -d "$WORKTREE/docs" ]; then rm -rf docs && cp -a "$WORKTREE/docs" docs; fi
+
+          # 4) Safety net: even if the base branch itself tracks these folders,
+          #    make sure no run workspace / audit / metrics content is staged.
+          git add -A
+          git reset -q -- .harness audit metrics 2>/dev/null || true
+          git rm -r --cached -q --ignore-unmatch .harness audit metrics 2>/dev/null || true
+
+          # 5) Nothing to commit means the run produced no code change under src/
+          #    or docs/ — do not raise an empty PR; keep WIP for inspection.
+          if git diff --cached --quiet; then
+            echo "::warning title=No code change to PR::No src/ or docs/ changes after clean-cut; PR skipped, WIP branch kept."
+            echo "pr_raised=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Harness: $FEATURE — code change (run ${{ github.run_id }})"
           git push origin "$BRANCH"
+
           # pr_raised gates the WIP cleanup below: the working branch is only safe
           # to delete once the change is preserved in an actual PR. A skipped or
           # failed PR create leaves pr_raised=false, so the WIP branch is KEPT and
           # the change is never lost.
-          if [ -f .harness/pr-body.md ]; then
-            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base "$PR_BASE" --head "$BRANCH" \
+          PR_BODY="$WORKTREE/pr-body.md"
+          if [ -f "$PR_BODY" ]; then
+            gh pr create --title "Harness: $FEATURE" --body-file "$PR_BODY" --base "$PR_BASE" --head "$BRANCH" \
               && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           else
             gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "$PR_BASE" --head "$BRANCH" \
               && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           fi
+          rm -rf "$WORKTREE"
+
+          # 6) Return the working tree to the WIP branch. This step cut a clean PR
+          #    branch (no audit/, no metrics/), but the LATER "Delete working
+          #    branch" step reads audit/*/run-summary.json from the working tree to
+          #    confirm status=done before removing the resume point. Switch back so
+          #    that folder is visible again. The audit branch was already snapshotted
+          #    before this step, so nothing is lost.
+          git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
 
       # --- 9a. delete the working branch — ONLY on a clean, PR-raised success ---
       # The WIP branch (harness-wip/<feature>) is the resume point. It is safe to
